@@ -9,8 +9,15 @@ from typing import Any
 
 from github import Auth, Github
 
+from coco_pr_review.config import find_config, load_config
 from coco_pr_review.github.client import GitHubClient
+from coco_pr_review.github.publisher import Publisher
+from coco_pr_review.orchestration.base import BudgetGate, NoOpProgressSink
+from coco_pr_review.orchestration.python_fanout import PythonFanoutOrchestrator
+from coco_pr_review.prompts import discover_conventions
 from coco_pr_review.review_runner import ReviewRunResult, run_review
+from coco_pr_review.reviewer_spec import parse_agent_md
+from coco_pr_review.sanitize import redact
 
 TRIGGER_MENTION = "@coco-review"
 ALLOWED_AUTHOR_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
@@ -183,7 +190,56 @@ async def run_github_event(
 
 
 def main() -> int:
-    """CLI entrypoint placeholder for GitHub Actions event dispatch."""
-    raise UnsupportedGitHubEventError(
-        "CLI wiring is not implemented yet; call run_github_event from the workflow harness"
-    )
+    """CLI entrypoint for GitHub Actions event dispatch."""
+    repo_root = Path(os.environ.get("GITHUB_WORKSPACE", Path.cwd())).resolve()
+    config_path = find_config(repo_root)
+    config = load_config(config_path)
+
+    reviewers_dir = repo_root / "src" / "coco_pr_review" / "agents"
+    reviewers = [
+        parse_agent_md(reviewers_dir / "bugs-and-security.md"),
+        parse_agent_md(reviewers_dir / "tests-coverage.md"),
+        parse_agent_md(reviewers_dir / "style-and-conventions.md"),
+        parse_agent_md(reviewers_dir / "performance-and-cost.md"),
+    ]
+    verifier = parse_agent_md(reviewers_dir / "verifier.md")
+
+    orchestrator = PythonFanoutOrchestrator(config=config)
+    github = Github(auth=Auth.Token(os.environ["GITHUB_TOKEN"]))
+    budget = BudgetGate(max_usd=config.limits.max_usd_per_pr)
+    progress = NoOpProgressSink()
+
+    conventions_path = discover_conventions(repo_root)
+    conventions_text = conventions_path.read_text() if conventions_path else None
+
+    try:
+        event = parse_github_event()
+        publisher = Publisher(
+            github=github,
+            repo_full_name=event.repo_full_name,
+            pr_number=event.pr_number,
+            head_sha=event.head_sha if isinstance(event, PullRequestEvent) else github.get_repo(event.repo_full_name).get_pull(event.pr_number).head.sha,
+            sanitize_fn=redact,
+        )
+        result = __import__("asyncio").run(
+            run_github_event(
+                repo_root=repo_root,
+                config=config,
+                reviewers=reviewers,
+                verifier=verifier,
+                orchestrator=orchestrator,
+                publisher=publisher,
+                budget=budget,
+                progress=progress,
+                sanitize_fn=redact,
+                conventions_text=conventions_text,
+                payload=load_event_payload(),
+                event_name=os.environ.get("GITHUB_EVENT_NAME"),
+                github=github,
+            )
+        )
+    except UnsupportedGitHubEventError as exc:
+        print(str(exc))
+        return 1
+
+    return 0 if isinstance(result, ReviewRunResult) else 1

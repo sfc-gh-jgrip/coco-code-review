@@ -40,6 +40,7 @@ tmp/
 
 # Local Claude settings
 .claude/settings.local.json
+.cortex/
 
 # Local Cortex Code notes
 CLAUDE.md
