@@ -1,0 +1,161 @@
+"""Tests for `coco_pr_review.github.sticky` — sticky summary comment find/edit/render."""
+from __future__ import annotations
+
+from unittest.mock import MagicMock, call
+
+
+# ---------------------------------------------------------------------------
+# find_sticky_comment
+# ---------------------------------------------------------------------------
+
+
+def test_find_sticky_comment_returns_matching_comment() -> None:
+    """find_sticky_comment returns the IssueComment whose body contains the summary marker."""
+    from coco_pr_review.github.sticky import find_sticky_comment
+
+    marker = "<!-- coco-pr-review:summary -->"
+    matching_comment = MagicMock()
+    matching_comment.body = f"## 🤖 Coco PR Review\n{marker}\n\nSome content"
+
+    other_comment = MagicMock()
+    other_comment.body = "Just a regular comment"
+
+    pr_mock = MagicMock()
+    pr_mock.get_issue_comments.return_value = [other_comment, matching_comment]
+
+    result = find_sticky_comment(pr_mock)
+    assert result is matching_comment
+
+
+def test_find_sticky_comment_returns_none_when_no_marker() -> None:
+    """When no comment contains the marker, returns None."""
+    from coco_pr_review.github.sticky import find_sticky_comment
+
+    comment_a = MagicMock()
+    comment_a.body = "Looks good to me!"
+
+    comment_b = MagicMock()
+    comment_b.body = "LGTM, ship it"
+
+    pr_mock = MagicMock()
+    pr_mock.get_issue_comments.return_value = [comment_a, comment_b]
+
+    result = find_sticky_comment(pr_mock)
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# upsert_sticky_comment — edit path
+# ---------------------------------------------------------------------------
+
+
+def test_upsert_sticky_comment_edits_existing_when_found() -> None:
+    """When a sticky comment already exists, upsert calls comment.edit with sanitized body."""
+    from coco_pr_review.github.sticky import upsert_sticky_comment
+
+    marker = "<!-- coco-pr-review:summary -->"
+    existing_comment = MagicMock()
+    existing_comment.body = f"Old content\n{marker}"
+
+    pr_mock = MagicMock()
+    pr_mock.get_issue_comments.return_value = [existing_comment]
+
+    sanitize_fn = MagicMock(side_effect=lambda x: x)
+    new_body = "New content with marker"
+
+    upsert_sticky_comment(pr_mock, new_body, sanitize_fn)
+
+    existing_comment.edit.assert_called_once()
+    pr_mock.create_issue_comment.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# upsert_sticky_comment — create path
+# ---------------------------------------------------------------------------
+
+
+def test_upsert_sticky_comment_creates_when_not_found() -> None:
+    """When no sticky comment exists, upsert creates a new issue comment."""
+    from coco_pr_review.github.sticky import upsert_sticky_comment
+
+    pr_mock = MagicMock()
+    pr_mock.get_issue_comments.return_value = []
+
+    sanitize_fn = MagicMock(side_effect=lambda x: x)
+    new_body = "Brand new sticky"
+
+    upsert_sticky_comment(pr_mock, new_body, sanitize_fn)
+
+    pr_mock.create_issue_comment.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# upsert_sticky_comment — sanitize_fn invoked BEFORE post
+# ---------------------------------------------------------------------------
+
+
+def test_upsert_sticky_comment_sanitizes_before_posting() -> None:
+    """sanitize_fn is called on the body before either edit or create."""
+    from coco_pr_review.github.sticky import upsert_sticky_comment
+
+    pr_mock = MagicMock()
+    pr_mock.get_issue_comments.return_value = []  # create path
+
+    sanitize_fn = MagicMock(return_value="SANITIZED")
+    new_body = "Unsanitized body with AKIAIOSFODNN7EXAMPLE"
+
+    upsert_sticky_comment(pr_mock, new_body, sanitize_fn)
+
+    sanitize_fn.assert_called_once_with(new_body)
+    # The create call should receive the sanitized version
+    pr_mock.create_issue_comment.assert_called_once_with(body="SANITIZED")
+
+
+# ---------------------------------------------------------------------------
+# render_sticky_progress
+# ---------------------------------------------------------------------------
+
+
+def test_render_sticky_progress_includes_marker_and_phase() -> None:
+    """render_sticky_progress returns markdown starting with the marker and showing phase info."""
+    from coco_pr_review.github.sticky import render_sticky_progress
+
+    run_result = MagicMock()
+    run_result.findings = [MagicMock(), MagicMock(), MagicMock()]
+
+    body = render_sticky_progress(phase="reviewing", run_result=run_result)
+
+    assert "<!-- coco-pr-review:summary -->" in body
+    assert "reviewing" in body
+
+
+def test_render_sticky_progress_contains_finding_count() -> None:
+    """The progress render includes the number of findings from run_result."""
+    from coco_pr_review.github.sticky import render_sticky_progress
+
+    run_result = MagicMock()
+    run_result.findings = [MagicMock() for _ in range(5)]
+
+    body = render_sticky_progress(phase="verifying", run_result=run_result)
+
+    assert "5" in body
+
+
+def test_render_sticky_skipped_mentions_reason() -> None:
+    """Skip sticky rendering includes the shared marker and reason text."""
+    from coco_pr_review.github.sticky import render_sticky_skipped
+
+    body = render_sticky_skipped(reason="pull request author is a bot account")
+
+    assert "<!-- coco-pr-review:summary -->" in body
+    assert "pull request author is a bot account" in body
+
+
+def test_render_sticky_diff_too_large_mentions_split_guidance() -> None:
+    """Large-diff sticky rendering asks the author to split the PR."""
+    from coco_pr_review.github.sticky import render_sticky_diff_too_large
+
+    body = render_sticky_diff_too_large(max_diff_lines=2000)
+
+    assert "2000 changed lines" in body
+    assert "Consider splitting this change into smaller PRs" in body
