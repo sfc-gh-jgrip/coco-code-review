@@ -1,0 +1,107 @@
+name: coco-pr-review-smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: Repository that owns the fixture PR, for example owner/repo
+        required: true
+        type: string
+      pr_number:
+        description: Pull request number to review
+        required: true
+        type: number
+      head_sha:
+        description: Expected fixture PR head SHA
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  checks: write
+  id-token: write
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out fixture pull request head
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repository }}
+          fetch-depth: 0
+          ref: ${{ inputs.head_sha }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check out reviewer workflow repository
+        uses: actions/checkout@v4
+        with:
+          path: coco-pr-review
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: coco-pr-review/pyproject.toml
+
+      - name: Install Cortex Code
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/snowflakedb/cortex-code/main/install.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Verify Cortex Code
+        run: |
+          which cortex
+          cortex --help
+
+      - name: Install package
+        working-directory: coco-pr-review
+        run: |
+          python -m pip install --upgrade pip
+          pip install .
+
+      - name: Write synthetic pull_request event
+        env:
+          SMOKE_REPOSITORY: ${{ inputs.repository }}
+          SMOKE_PR_NUMBER: ${{ inputs.pr_number }}
+          SMOKE_HEAD_SHA: ${{ inputs.head_sha }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          event_path = Path(os.environ["RUNNER_TEMP"]) / "coco-pr-review-smoke-event.json"
+          payload = {
+              "number": int(os.environ["SMOKE_PR_NUMBER"]),
+              "repository": {"full_name": os.environ["SMOKE_REPOSITORY"]},
+              "pull_request": {
+                  "number": int(os.environ["SMOKE_PR_NUMBER"]),
+                  "head": {"sha": os.environ["SMOKE_HEAD_SHA"]},
+              },
+          }
+          event_path.write_text(json.dumps(payload), encoding="utf-8")
+          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as env_file:
+              env_file.write(f"SMOKE_EVENT_PATH={event_path}\n")
+          PY
+
+      - name: Run Coco PR review smoke test
+        working-directory: ${{ github.workspace }}/coco-pr-review
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_EVENT_NAME: pull_request
+          GITHUB_EVENT_PATH: ${{ env.SMOKE_EVENT_PATH }}
+          GITHUB_REPOSITORY: ${{ inputs.repository }}
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+          SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_HOST: ${{ vars.SNOWFLAKE_HOST }}
+          SNOWFLAKE_USER: SVC_COCO_REVIEW
+          SNOWFLAKE_AUTHENTICATOR: OAUTH
+          SNOWFLAKE_OAUTH_CLIENT_PROVIDER: CUSTOM
+          SNOWFLAKE_OAUTH_AUTHORIZATION_SERVER: COCO_GITHUB_OIDC_PROBE
+          SNOWFLAKE_OAUTH_DISABLE_PKCE: true
+        run: python -m coco_pr_review
