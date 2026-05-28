@@ -3,16 +3,19 @@ from __future__ import annotations
 
 import json
 import os
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from cortex_code_agent_sdk import CortexCodeAgentOptions, query
 from github import Auth, Github
 
 from coco_pr_review.config import find_config, load_config
 from coco_pr_review.github.client import GitHubClient
 from coco_pr_review.github.publisher import Publisher
 from coco_pr_review.orchestration.base import BudgetGate, NoOpProgressSink
+from coco_pr_review.orchestration.sdk_adapter import run_one_query
 from coco_pr_review.orchestration.python_fanout import PythonFanoutOrchestrator
 from coco_pr_review.prompts import discover_conventions
 from coco_pr_review.review_runner import ReviewRunResult, run_review
@@ -204,7 +207,17 @@ def main() -> int:
     ]
     verifier = parse_agent_md(reviewers_dir / "verifier.md")
 
-    orchestrator = PythonFanoutOrchestrator(config=config)
+    async def run_one_query_with_sdk(*, system_prompt: str, user_prompt: str, **_: Any) -> tuple[Any, Any]:
+        message_stream = query(
+            prompt=user_prompt,
+            options=CortexCodeAgentOptions(
+                cwd=str(repo_root),
+                append_system_prompt=system_prompt,
+            ),
+        )
+        return await run_one_query(message_stream=message_stream)
+
+    orchestrator = PythonFanoutOrchestrator(run_one_query=run_one_query_with_sdk, config=config)
     github = Github(auth=Auth.Token(os.environ["GITHUB_TOKEN"]))
     budget = BudgetGate(max_usd=config.limits.max_usd_per_pr)
     progress = NoOpProgressSink()
@@ -221,7 +234,7 @@ def main() -> int:
             head_sha=event.head_sha if isinstance(event, PullRequestEvent) else github.get_repo(event.repo_full_name).get_pull(event.pr_number).head.sha,
             sanitize_fn=redact,
         )
-        result = __import__("asyncio").run(
+        result = asyncio.run(
             run_github_event(
                 repo_root=repo_root,
                 config=config,
