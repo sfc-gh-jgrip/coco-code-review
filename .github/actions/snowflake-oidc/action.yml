@@ -1,0 +1,66 @@
+name: Snowflake OIDC (WIF) auth
+description: >
+  Mint a GitHub Actions OIDC token and write a Cortex Code-readable
+  connections.toml that authenticates to Snowflake via Workload Identity
+  Federation (no long-lived secrets).
+
+inputs:
+  account:
+    description: Snowflake account identifier (e.g. myorg-myaccount)
+    required: true
+  host:
+    description: Snowflake account host (e.g. abc12345.eu-central-1.snowflakecomputing.com)
+    required: true
+  user:
+    description: Snowflake service user configured with WORKLOAD_IDENTITY
+    required: true
+  role:
+    description: Snowflake role for the service user
+    required: true
+  warehouse:
+    description: Snowflake warehouse for the service user
+    required: true
+  audience:
+    description: OIDC token audience expected by Snowflake
+    required: false
+    default: snowflakecomputing.com
+
+runs:
+  using: composite
+  steps:
+    - name: Mint OIDC token and write connections.toml
+      shell: bash
+      env:
+        SNOWFLAKE_ACCOUNT: ${{ inputs.account }}
+        SNOWFLAKE_HOST: ${{ inputs.host }}
+        SNOWFLAKE_USER: ${{ inputs.user }}
+        SNOWFLAKE_ROLE: ${{ inputs.role }}
+        SNOWFLAKE_WAREHOUSE: ${{ inputs.warehouse }}
+        OIDC_AUDIENCE: ${{ inputs.audience }}
+      run: |
+        set -euo pipefail
+        if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+          echo "OIDC is not available. Ensure the job has 'permissions: id-token: write'." >&2
+          exit 1
+        fi
+        oidc_token="$(curl -sS \
+          -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+          "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$OIDC_AUDIENCE" \
+          | jq -r '.value')"
+        if [ -z "$oidc_token" ] || [ "$oidc_token" = "null" ]; then
+          echo "Failed to mint GitHub OIDC token" >&2
+          exit 1
+        fi
+        mkdir -p "$HOME/.snowflake"
+        cat > "$HOME/.snowflake/connections.toml" <<EOF
+        [default]
+        account = "$SNOWFLAKE_ACCOUNT"
+        host = "$SNOWFLAKE_HOST"
+        user = "$SNOWFLAKE_USER"
+        role = "$SNOWFLAKE_ROLE"
+        warehouse = "$SNOWFLAKE_WAREHOUSE"
+        authenticator = "WORKLOAD_IDENTITY"
+        workload_identity_provider = "OIDC"
+        token = "$oidc_token"
+        EOF
+        chmod 600 "$HOME/.snowflake/connections.toml"

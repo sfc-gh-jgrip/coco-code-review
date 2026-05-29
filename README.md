@@ -45,37 +45,85 @@ Recommended model:
 
 This repository's concrete deployment contract is GitHub OIDC via Workload Identity Federation.
 
-Snowflake objects provisioned for this repository:
+### Required configuration (repository variables)
 
-- Service user: `SVC_COCO_REVIEW` (`TYPE = SERVICE`)
-- Role: `COCO_REVIEWER`
-- Warehouse grant: `USAGE` on `XS_WH`
-- Cortex grant: `SNOWFLAKE.CORTEX_USER`
-- Workload identity: OIDC issuer `https://token.actions.githubusercontent.com`, subject bound to the GitHub repository
+All Snowflake configuration is supplied through GitHub Actions **repository variables**
+(Settings → Secrets and variables → Actions → Variables). These are identifiers, not
+credentials, so they are variables rather than secrets — Workload Identity Federation
+means there is **no long-lived secret to store** (no password, key pair, or token).
 
-GitHub Actions configuration required for this repository:
+| Variable | Example | Purpose |
+|----------|---------|---------|
+| `SNOWFLAKE_ACCOUNT` | `myorg-myaccount` | Account identifier |
+| `SNOWFLAKE_HOST` | `abc12345.eu-central-1.snowflakecomputing.com` | Account host |
+| `SNOWFLAKE_USER` | `SVC_COCO_REVIEW` | Service user bound to GitHub OIDC |
+| `SNOWFLAKE_ROLE` | `COCO_REVIEWER` | Role for the service user |
+| `SNOWFLAKE_WAREHOUSE` | `XS_WH` | Warehouse the reviewer may use |
 
-1. Set repository variable `SNOWFLAKE_ACCOUNT` to the Snowflake account identifier.
-2. Set repository variable `SNOWFLAKE_HOST` to the Snowflake account host, for example `kw35710.eu-central-1.snowflakecomputing.com`.
-3. Do not set a Snowflake password, private key, or `connections.toml` secret for this workflow.
-4. Keep workflow permission `id-token: write` enabled so GitHub can mint the OIDC token used by Snowflake authentication.
+The only secret used is the built-in `${{ secrets.GITHUB_TOKEN }}`, which GitHub injects
+automatically. If you prefer to source the values above from an external key vault, fetch
+them in a prior step and set them as outputs/env — the workflows only read them via
+`${{ vars.* }}`.
 
-How the Snowflake identity is bound:
+Also required:
 
-- The service user `SVC_COCO_REVIEW` has `WORKLOAD_IDENTITY = (TYPE = OIDC, ISSUER = 'https://token.actions.githubusercontent.com', SUBJECT = '<repo subject>')`.
-- The GitHub OIDC `sub` claim must match the configured `SUBJECT`. The claim differs by trigger: a `pull_request` run is `repo:<owner>/<repo>:pull_request`, while a `workflow_dispatch` run is `repo:<owner>/<repo>:ref:refs/heads/<branch>`.
-- The workflow authenticates with `snowflakedb/snowflake-cli-action@v2` (`use-oidc: true`), which mints the GitHub OIDC token with audience `snowflakecomputing.com` and exports `SNOWFLAKE_AUTHENTICATOR=WORKLOAD_IDENTITY` plus the token for downstream steps.
+- Workflow permission `id-token: write` (already set in both workflows) so GitHub can mint
+  the OIDC token used for Snowflake authentication.
 
-For downstream users of this repository:
+### Snowflake-side setup
 
-- The code is intentionally implemented for a single auth contract at a time.
-- If another repository wants to reuse this project, it should provision its own service user, role, and OIDC integration matching its GitHub repository identity, then update the workflow environment values accordingly.
-- Secret-based service-user login is not implemented as a runtime fallback in this repository.
+The Snowflake objects are not created by the workflow; provision them once per account.
+Run [`setup/snowflake_setup.sql`](setup/snowflake_setup.sql) (fill in the placeholders).
+It creates:
+
+- A `TYPE = SERVICE` user bound to GitHub OIDC via `WORKLOAD_IDENTITY = (TYPE = OIDC, ISSUER = 'https://token.actions.githubusercontent.com', SUBJECT = '<repo subject>')`.
+- A role with `SNOWFLAKE.CORTEX_USER` and `USAGE` on the warehouse.
+- `LOGIN_NAME` equal to the user name (WIF rejects a mismatched `LOGIN_NAME`).
+- A user-scoped network policy that allows GitHub Actions egress IPs (e.g. via the managed rule `SNOWFLAKE.NETWORK_SECURITY.GITHUBACTIONS_GLOBAL`), if your account enforces an account-level network policy.
+
+The OIDC `sub` claim must match the configured `SUBJECT`, and it differs by trigger:
+
+- `pull_request` run: `repo:<owner>/<repo>:pull_request`
+- `workflow_dispatch` run: `repo:<owner>/<repo>:ref:refs/heads/<branch>`
+
+The production workflow runs on `pull_request`, so use the `pull_request` subject for it.
+
+### How authentication works at runtime
+
+Both workflows call the reusable composite action [`.github/actions/snowflake-oidc`](.github/actions/snowflake-oidc/action.yml),
+which mints the GitHub OIDC token (audience `snowflakecomputing.com`) and writes a
+Cortex-readable `~/.snowflake/connections.toml` using `authenticator = WORKLOAD_IDENTITY`.
+The Cortex Code CLI then authenticates with that token — no secret is persisted.
+
+### Reusing this reviewer in another repository
+
+1. Provision the Snowflake side in your account with `setup/snowflake_setup.sql`, using your
+   own user/role/warehouse names and your repo's OIDC subject.
+2. Set the five repository variables above (plus `id-token: write` permission).
+3. Reference the auth action and run the reviewer. You can either copy the workflow, or call
+   the composite action directly from your own workflow:
+
+   ```yaml
+   permissions:
+     id-token: write
+     contents: read
+     pull-requests: write
+   steps:
+     - uses: actions/checkout@v4
+     - uses: sfc-gh-jgrip/coco-code-review/.github/actions/snowflake-oidc@main
+       with:
+         account: ${{ vars.SNOWFLAKE_ACCOUNT }}
+         host: ${{ vars.SNOWFLAKE_HOST }}
+         user: ${{ vars.SNOWFLAKE_USER }}
+         role: ${{ vars.SNOWFLAKE_ROLE }}
+         warehouse: ${{ vars.SNOWFLAKE_WAREHOUSE }}
+     # ... install the package and run `python -m coco_pr_review`
+   ```
 
 What not to do:
 
 - Do not commit auth files or generated connection artifacts to the repo.
-- Do not store long-lived credentials in plaintext repository variables.
+- Do not store long-lived Snowflake credentials anywhere — WIF does not need them.
 - Do not run this automation under a personal Snowflake user account.
 
 ## Local development

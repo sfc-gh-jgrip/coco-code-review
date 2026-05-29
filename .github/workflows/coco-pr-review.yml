@@ -56,35 +56,13 @@ jobs:
           pip install .
 
       - name: Authenticate to Snowflake via GitHub OIDC
-        env:
-          SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT }}
-          SNOWFLAKE_HOST: ${{ vars.SNOWFLAKE_HOST }}
-          SNOWFLAKE_USER: ${{ vars.SNOWFLAKE_USER }}
-          SNOWFLAKE_ROLE: ${{ vars.SNOWFLAKE_ROLE }}
-          SNOWFLAKE_WAREHOUSE: ${{ vars.SNOWFLAKE_WAREHOUSE }}
-        run: |
-          set -euo pipefail
-          oidc_token="$(curl -sS \
-            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=snowflakecomputing.com" \
-            | jq -r '.value')"
-          if [ -z "$oidc_token" ] || [ "$oidc_token" = "null" ]; then
-            echo "Failed to mint GitHub OIDC token" >&2
-            exit 1
-          fi
-          mkdir -p "$HOME/.snowflake"
-          cat > "$HOME/.snowflake/connections.toml" <<EOF
-          [default]
-          account = "$SNOWFLAKE_ACCOUNT"
-          host = "$SNOWFLAKE_HOST"
-          user = "$SNOWFLAKE_USER"
-          role = "$SNOWFLAKE_ROLE"
-          warehouse = "$SNOWFLAKE_WAREHOUSE"
-          authenticator = "WORKLOAD_IDENTITY"
-          workload_identity_provider = "OIDC"
-          token = "$oidc_token"
-          EOF
-          chmod 600 "$HOME/.snowflake/connections.toml"
+        uses: ./.github/actions/snowflake-oidc
+        with:
+          account: ${{ vars.SNOWFLAKE_ACCOUNT }}
+          host: ${{ vars.SNOWFLAKE_HOST }}
+          user: ${{ vars.SNOWFLAKE_USER }}
+          role: ${{ vars.SNOWFLAKE_ROLE }}
+          warehouse: ${{ vars.SNOWFLAKE_WAREHOUSE }}
 
       - name: Run Coco PR review
         env:
