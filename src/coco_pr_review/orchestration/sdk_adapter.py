@@ -34,13 +34,19 @@ class HardSdkError(Exception):
 # ---------------------------------------------------------------------------
 
 
-def _raise_classified(subtype: str) -> None:
-    """Raise the appropriate exception type for an SDK error subtype."""
+def _raise_classified(subtype: str, detail: str | None = None) -> None:
+    """Raise the appropriate exception type for an SDK error subtype.
+
+    ``detail`` carries the SDK's human-readable error text (e.g. the
+    ResultMessage ``result`` field) so failures surface a real cause instead of
+    only the opaque subtype.
+    """
+    message = f"{subtype}: {detail}" if detail else subtype
     classification = classify_sdk_error(subtype)
     if classification == "hard":
-        raise HardSdkError(subtype)
+        raise HardSdkError(message)
     # Default to transient — safer to retry than to abort.
-    raise TransientSdkError(subtype)
+    raise TransientSdkError(message)
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +100,8 @@ async def run_one_query(
         if hasattr(msg, "is_error"):
             if msg.is_error:
                 subtype = getattr(msg, "subtype", "unknown") or "unknown"
-                _raise_classified(subtype)
+                detail = getattr(msg, "result", None)
+                _raise_classified(subtype, detail)
             # Success terminal message.
             result_message = msg
 
