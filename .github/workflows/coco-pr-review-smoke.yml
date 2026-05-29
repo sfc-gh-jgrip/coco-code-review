@@ -90,9 +90,32 @@ jobs:
           PY
 
       - name: Authenticate to Snowflake via GitHub OIDC
-        uses: snowflakedb/snowflake-cli-action@v2.0
-        with:
-          use-oidc: true
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_HOST: ${{ vars.SNOWFLAKE_HOST }}
+        run: |
+          set -euo pipefail
+          oidc_token="$(curl -sS \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=snowflakecomputing.com" \
+            | jq -r '.value')"
+          if [ -z "$oidc_token" ] || [ "$oidc_token" = "null" ]; then
+            echo "Failed to mint GitHub OIDC token" >&2
+            exit 1
+          fi
+          mkdir -p "$HOME/.snowflake"
+          cat > "$HOME/.snowflake/connections.toml" <<EOF
+          [default]
+          account = "$SNOWFLAKE_ACCOUNT"
+          host = "$SNOWFLAKE_HOST"
+          user = "SVC_COCO_REVIEW"
+          role = "COCO_REVIEWER"
+          warehouse = "XS_WH"
+          authenticator = "WORKLOAD_IDENTITY"
+          workload_identity_provider = "OIDC"
+          token = "$oidc_token"
+          EOF
+          chmod 600 "$HOME/.snowflake/connections.toml"
 
       - name: Run Coco PR review smoke test
         working-directory: ${{ github.workspace }}/coco-pr-review
@@ -104,7 +127,5 @@ jobs:
           GITHUB_WORKSPACE: ${{ github.workspace }}
           SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT }}
           SNOWFLAKE_HOST: ${{ vars.SNOWFLAKE_HOST }}
-          SNOWFLAKE_USER: SVC_COCO_REVIEW
-          SNOWFLAKE_ROLE: COCO_REVIEWER
-          SNOWFLAKE_WAREHOUSE: XS_WH
+          SNOWFLAKE_DEFAULT_CONNECTION_NAME: default
         run: python -m coco_pr_review
