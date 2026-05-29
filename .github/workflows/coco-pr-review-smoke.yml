@@ -89,6 +89,11 @@ jobs:
               env_file.write(f"SMOKE_EVENT_PATH={event_path}\n")
           PY
 
+      - name: Authenticate to Snowflake via GitHub OIDC
+        uses: snowflakedb/snowflake-cli-action@v2.0
+        with:
+          use-oidc: true
+
       - name: Run Coco PR review smoke test
         working-directory: ${{ github.workspace }}/coco-pr-review
         env:
@@ -100,8 +105,6 @@ jobs:
           SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT }}
           SNOWFLAKE_HOST: ${{ vars.SNOWFLAKE_HOST }}
           SNOWFLAKE_USER: SVC_COCO_REVIEW
-          SNOWFLAKE_AUTHENTICATOR: OAUTH
-          SNOWFLAKE_OAUTH_CLIENT_PROVIDER: CUSTOM
-          SNOWFLAKE_OAUTH_AUTHORIZATION_SERVER: COCO_GITHUB_OIDC_PROBE
-          SNOWFLAKE_OAUTH_DISABLE_PKCE: true
+          SNOWFLAKE_ROLE: COCO_REVIEWER
+          SNOWFLAKE_WAREHOUSE: XS_WH
         run: python -m coco_pr_review

@@ -39,19 +39,19 @@ Snowflake authentication is separate from GitHub authentication.
 Recommended model:
 
 - Create a dedicated Snowflake service identity for this automation instead of using a human user.
-- Use GitHub Actions OIDC and a Snowflake external OAuth integration instead of long-lived passwords or key files.
-- Keep Snowflake authentication material in GitHub Actions environment configuration only.
+- Use GitHub Actions OIDC with Snowflake Workload Identity Federation (WIF) instead of long-lived passwords or key files.
+- Keep Snowflake authentication configuration in GitHub Actions environment/variables only.
 - Do not commit `connections.toml`, private keys, passwords, or generated auth files to this repository.
 
-This repository's concrete deployment contract is OIDC only.
+This repository's concrete deployment contract is GitHub OIDC via Workload Identity Federation.
 
 Snowflake objects provisioned for this repository:
 
-- Service user: `SVC_COCO_REVIEW`
+- Service user: `SVC_COCO_REVIEW` (`TYPE = SERVICE`)
 - Role: `COCO_REVIEWER`
 - Warehouse grant: `USAGE` on `XS_WH`
 - Cortex grant: `SNOWFLAKE.CORTEX_USER`
-- External OAuth integration: `COCO_GITHUB_OIDC_PROBE`
+- Workload identity: OIDC issuer `https://token.actions.githubusercontent.com`, subject bound to the GitHub repository
 
 GitHub Actions configuration required for this repository:
 
@@ -62,9 +62,9 @@ GitHub Actions configuration required for this repository:
 
 How the Snowflake identity is bound:
 
-- The Snowflake service user `SVC_COCO_REVIEW` has login name `REPO:JGRIP/COCO-CODE-REVIEW:PULL_REQUEST`.
-- The external OAuth integration trusts issuer `https://token.actions.githubusercontent.com`.
-- Snowflake maps the GitHub OIDC `sub` claim to the Snowflake user `LOGIN_NAME`.
+- The service user `SVC_COCO_REVIEW` has `WORKLOAD_IDENTITY = (TYPE = OIDC, ISSUER = 'https://token.actions.githubusercontent.com', SUBJECT = '<repo subject>')`.
+- The GitHub OIDC `sub` claim must match the configured `SUBJECT`. The claim differs by trigger: a `pull_request` run is `repo:<owner>/<repo>:pull_request`, while a `workflow_dispatch` run is `repo:<owner>/<repo>:ref:refs/heads/<branch>`.
+- The workflow authenticates with `snowflakedb/snowflake-cli-action@v2` (`use-oidc: true`), which mints the GitHub OIDC token with audience `snowflakecomputing.com` and exports `SNOWFLAKE_AUTHENTICATOR=WORKLOAD_IDENTITY` plus the token for downstream steps.
 
 For downstream users of this repository:
 
