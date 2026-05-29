@@ -50,7 +50,7 @@ jobs:
 
       - name: Install Cortex Code
         run: |
-          curl -fsSL https://raw.githubusercontent.com/snowflakedb/cortex-code/main/install.sh | bash
+          curl -fsSL https://ai.snowflake.com/static/cc-scripts/install.sh | bash
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Verify Cortex Code
