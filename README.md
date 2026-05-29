@@ -81,12 +81,21 @@ It creates:
 - `LOGIN_NAME` equal to the user name (WIF rejects a mismatched `LOGIN_NAME`).
 - A user-scoped network policy that allows GitHub Actions egress IPs (e.g. via the managed rule `SNOWFLAKE.NETWORK_SECURITY.GITHUBACTIONS_GLOBAL`), if your account enforces an account-level network policy.
 
-The OIDC `sub` claim must match the configured `SUBJECT`, and it differs by trigger:
+The OIDC `sub` claim must match the configured `SUBJECT`. By default the claim
+differs by trigger (`pull_request` → `repo:<owner>/<repo>:pull_request`,
+`workflow_dispatch` → `repo:<owner>/<repo>:ref:refs/heads/<branch>`), which would
+require a separate subject per trigger. To support every trigger with a single
+subject, this repo pins a **stable subject claim** via GitHub's OIDC customization:
 
-- `pull_request` run: `repo:<owner>/<repo>:pull_request`
-- `workflow_dispatch` run: `repo:<owner>/<repo>:ref:refs/heads/<branch>`
+```bash
+echo '{"use_default":false,"include_claim_keys":["repository"]}' \
+  | gh api --method PUT repos/<OWNER>/<REPO>/actions/oidc/customization/sub --input -
+```
 
-The production workflow runs on `pull_request`, so use the `pull_request` subject for it.
+That makes the token subject always `repo:<owner>/<repo>` regardless of trigger, so
+the WIF `SUBJECT` is simply `repo:<owner>/<repo>`. Tradeoff: any workflow in the repo
+can assume the identity, which is acceptable for this low-privilege reviewer user
+(Cortex usage + one warehouse). Tighten the claim keys if you need a narrower scope.
 
 ### How authentication works at runtime
 

@@ -24,10 +24,15 @@ GRANT USAGE ON WAREHOUSE <WAREHOUSE> TO ROLE <REVIEWER_ROLE>;
 
 -- 2. Service user bound to GitHub OIDC via Workload Identity Federation ------
 -- IMPORTANT: the SUBJECT must match the GitHub OIDC `sub` claim of the run.
+-- By default the claim differs per trigger:
 --   pull_request event:   repo:<OWNER>/<REPO>:pull_request
 --   workflow_dispatch:    repo:<OWNER>/<REPO>:ref:refs/heads/<BRANCH>
--- Pick the subject for the trigger you actually run. The production workflow
--- runs on pull_request, so use the pull_request subject for it.
+-- To cover every trigger with ONE subject, pin a stable claim once (run as a
+-- repo admin, outside Snowflake):
+--   echo '{"use_default":false,"include_claim_keys":["repository"]}' \
+--     | gh api --method PUT repos/<OWNER>/<REPO>/actions/oidc/customization/sub --input -
+-- The token subject is then always `repo:<OWNER>/<REPO>`, which is what the
+-- SUBJECT below uses.
 CREATE USER IF NOT EXISTS <SERVICE_USER>
   TYPE = SERVICE
   DEFAULT_ROLE = <REVIEWER_ROLE>
@@ -36,7 +41,7 @@ CREATE USER IF NOT EXISTS <SERVICE_USER>
   WORKLOAD_IDENTITY = (
     TYPE = OIDC,
     ISSUER = 'https://token.actions.githubusercontent.com',
-    SUBJECT = 'repo:<OWNER>/<REPO>:pull_request'
+    SUBJECT = 'repo:<OWNER>/<REPO>'
   );
 
 -- Keep LOGIN_NAME equal to the user name. WIF rejects a login request whose
