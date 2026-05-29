@@ -7,6 +7,16 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 
+def _make_review_run_result(*, status: str = "reviewed", aborted: bool = False):
+    from coco_pr_review.review_runner import ReviewRunResult
+
+    run_result = None
+    if status in {"reviewed", "aborted"}:
+        run_result = MagicMock()
+        run_result.aborted = aborted
+    return ReviewRunResult(status=status, run_result=run_result)
+
+
 def test_parse_pull_request_event() -> None:
     from coco_pr_review.github_event import PullRequestEvent, parse_github_event
 
@@ -231,3 +241,47 @@ async def test_issue_comment_trigger_fetches_latest_pr_head_sha() -> None:
     github_client = run_review.await_args.kwargs["github_client"]
     assert github_client.head_sha == "d" * 40
     repo.get_pull.assert_called_once_with(9)
+
+
+def test_main_returns_non_zero_for_aborted_review() -> None:
+    from coco_pr_review.github_event import main
+
+    github = MagicMock()
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setenv("GITHUB_WORKSPACE", "/tmp/repo")
+        monkeypatch.setenv("GITHUB_TOKEN", "token")
+        monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
+        monkeypatch.setenv("SNOWFLAKE_ACCOUNT", "acct")
+        monkeypatch.setenv("SNOWFLAKE_HOST", "acct.snowflakecomputing.com")
+        monkeypatch.setattr("coco_pr_review.github_event.find_config", lambda repo_root: Path("/tmp/coco.toml"))
+        monkeypatch.setattr("coco_pr_review.github_event.load_config", lambda path: MagicMock(limits=MagicMock(max_usd_per_pr=1, job_timeout_sec=1), reviewer=MagicMock(confidence_threshold=80)))
+        monkeypatch.setattr("coco_pr_review.github_event.parse_agent_md", lambda path: MagicMock(system_prompt="prompt"))
+        monkeypatch.setattr("coco_pr_review.github_event.discover_conventions", lambda repo_root: None)
+        monkeypatch.setattr("coco_pr_review.github_event.Github", lambda auth: github)
+        monkeypatch.setattr("coco_pr_review.github_event.load_event_payload", lambda event_path=None: {"repository": {"full_name": "owner/repo"}, "pull_request": {"number": 1, "head": {"sha": "a" * 40}}})
+        monkeypatch.setattr("coco_pr_review.github_event.run_github_event", AsyncMock(return_value=_make_review_run_result(status="aborted", aborted=True)))
+
+        assert main() == 1
+
+
+def test_main_returns_zero_for_reviewed_result() -> None:
+    from coco_pr_review.github_event import main
+
+    github = MagicMock()
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setenv("GITHUB_WORKSPACE", "/tmp/repo")
+        monkeypatch.setenv("GITHUB_TOKEN", "token")
+        monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request")
+        monkeypatch.setenv("SNOWFLAKE_ACCOUNT", "acct")
+        monkeypatch.setenv("SNOWFLAKE_HOST", "acct.snowflakecomputing.com")
+        monkeypatch.setattr("coco_pr_review.github_event.find_config", lambda repo_root: Path("/tmp/coco.toml"))
+        monkeypatch.setattr("coco_pr_review.github_event.load_config", lambda path: MagicMock(limits=MagicMock(max_usd_per_pr=1, job_timeout_sec=1), reviewer=MagicMock(confidence_threshold=80)))
+        monkeypatch.setattr("coco_pr_review.github_event.parse_agent_md", lambda path: MagicMock(system_prompt="prompt"))
+        monkeypatch.setattr("coco_pr_review.github_event.discover_conventions", lambda repo_root: None)
+        monkeypatch.setattr("coco_pr_review.github_event.Github", lambda auth: github)
+        monkeypatch.setattr("coco_pr_review.github_event.load_event_payload", lambda event_path=None: {"repository": {"full_name": "owner/repo"}, "pull_request": {"number": 1, "head": {"sha": "a" * 40}}})
+        monkeypatch.setattr("coco_pr_review.github_event.run_github_event", AsyncMock(return_value=_make_review_run_result(status="reviewed", aborted=False)))
+
+        assert main() == 0

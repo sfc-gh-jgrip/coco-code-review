@@ -192,11 +192,28 @@ async def run_github_event(
     )
 
 
+def resolve_event_context() -> tuple[str | None, str | None]:
+    """Resolve the event name and path, preferring explicit smoke overrides.
+
+    GitHub Actions does not reliably allow a step-level ``env:`` block to
+    override the reserved ``GITHUB_EVENT_NAME``/``GITHUB_EVENT_PATH`` values, so
+    the manual smoke workflow sets ``COCO_PR_REVIEW_EVENT_NAME`` and
+    ``COCO_PR_REVIEW_EVENT_PATH`` instead. Those take precedence when present.
+    """
+    event_name = os.environ.get("COCO_PR_REVIEW_EVENT_NAME") or os.environ.get("GITHUB_EVENT_NAME")
+    event_path = os.environ.get("COCO_PR_REVIEW_EVENT_PATH") or os.environ.get("GITHUB_EVENT_PATH")
+    return event_name, event_path
+
+
 def main() -> int:
     """CLI entrypoint for GitHub Actions event dispatch."""
     repo_root = Path(os.environ.get("GITHUB_WORKSPACE", Path.cwd())).resolve()
     config_path = find_config(repo_root)
     config = load_config(config_path)
+
+    if not os.environ.get("SNOWFLAKE_ACCOUNT") or not os.environ.get("SNOWFLAKE_HOST"):
+        print("SNOWFLAKE_ACCOUNT and SNOWFLAKE_HOST must be set for the review runtime")
+        return 1
 
     reviewers_dir = repo_root / "src" / "coco_pr_review" / "agents"
     reviewers = [
@@ -226,7 +243,9 @@ def main() -> int:
     conventions_text = conventions_path.read_text() if conventions_path else None
 
     try:
-        event = parse_github_event()
+        event_name, event_path = resolve_event_context()
+        payload = load_event_payload(event_path)
+        event = parse_github_event(event_name=event_name, payload=payload, event_path=event_path)
         publisher = Publisher(
             github=github,
             repo_full_name=event.repo_full_name,
@@ -246,8 +265,8 @@ def main() -> int:
                 progress=progress,
                 sanitize_fn=redact,
                 conventions_text=conventions_text,
-                payload=load_event_payload(),
-                event_name=os.environ.get("GITHUB_EVENT_NAME"),
+                payload=payload,
+                event_name=event_name,
                 github=github,
             )
         )
@@ -255,4 +274,8 @@ def main() -> int:
         print(str(exc))
         return 1
 
-    return 0 if isinstance(result, ReviewRunResult) else 1
+    if not isinstance(result, ReviewRunResult):
+        return 1
+    if result.run_result is not None and getattr(result.run_result, "aborted", False):
+        return 1
+    return 0

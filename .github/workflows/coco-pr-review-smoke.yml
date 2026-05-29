@@ -93,8 +93,8 @@ jobs:
         working-directory: ${{ github.workspace }}/coco-pr-review
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_EVENT_NAME: pull_request
-          GITHUB_EVENT_PATH: ${{ env.SMOKE_EVENT_PATH }}
+          COCO_PR_REVIEW_EVENT_NAME: pull_request
+          COCO_PR_REVIEW_EVENT_PATH: ${{ env.SMOKE_EVENT_PATH }}
           GITHUB_REPOSITORY: ${{ inputs.repository }}
           GITHUB_WORKSPACE: ${{ github.workspace }}
           SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT }}
