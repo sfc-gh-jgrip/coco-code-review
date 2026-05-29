@@ -104,6 +104,22 @@ def test_github_client_pr_author_is_bot_uses_user_type() -> None:
     assert client.pr_author_is_bot is True
 
 
+def test_github_client_bot_login_uses_default_actions_bot() -> None:
+    """Sticky filtering uses the default GitHub Actions bot login."""
+    from coco_pr_review.github.client import GitHubClient
+
+    gh = MagicMock()
+
+    client = GitHubClient(
+        github=gh,
+        repo_full_name="owner/repo",
+        pr_number=9,
+        head_sha="e" * 40,
+    )
+
+    assert client.bot_login == "github-actions[bot]"
+
+
 def test_github_client_is_draft_pr_uses_pull_request_draft_flag() -> None:
     """Draft state is derived from the pull request draft flag."""
     from coco_pr_review.github.client import GitHubClient
@@ -150,15 +166,18 @@ def test_github_client_label_names_materializes_pull_request_labels() -> None:
     assert client.label_names == {"coco-review:skip", "needs-triage"}
 
 
-def test_github_client_changed_files_materializes_changed_file_objects() -> None:
-    """Changed files are exposed as orchestrator-friendly dataclasses."""
+def test_github_client_changed_files_parses_patch_into_line_ranges() -> None:
+    """Changed files expose real hunk-derived ranges and carry their patch."""
     from coco_pr_review.github.client import GitHubClient
 
     gh = MagicMock()
     repo_mock = MagicMock()
     pr_mock = MagicMock()
-    file_a = MagicMock(filename="src/app.py", changes=3)
-    file_b = MagicMock(filename="README.md", changes=0)
+    patch_a = "@@ -1,3 +1,4 @@ def foo():\n context\n-old\n+new1\n+new2\n@@ -20 +21,2 @@\n+x\n+y"
+    file_a = MagicMock(filename="src/app.py", changes=4)
+    file_a.patch = patch_a
+    file_b = MagicMock(filename="src/util.py", changes=2)
+    file_b.patch = "@@ -5 +5 @@\n-gone\n+single"
     gh.get_repo.return_value = repo_mock
     repo_mock.get_pull.return_value = pr_mock
     pr_mock.get_files.return_value = [file_a, file_b]
@@ -172,7 +191,36 @@ def test_github_client_changed_files_materializes_changed_file_objects() -> None
 
     changed_files = client.changed_files
 
-    assert [(changed_file.path, changed_file.line_ranges) for changed_file in changed_files] == [
-        ("src/app.py", [(1, 3)]),
-        ("README.md", []),
+    assert [(f.path, f.line_ranges) for f in changed_files] == [
+        ("src/app.py", [(1, 4), (21, 22)]),
+        ("src/util.py", [(5, 5)]),
+    ]
+    assert changed_files[0].patch == patch_a
+
+
+def test_github_client_changed_files_falls_back_when_no_patch() -> None:
+    """Binary/patchless files fall back to a single whole-file-ish range."""
+    from coco_pr_review.github.client import GitHubClient
+
+    gh = MagicMock()
+    repo_mock = MagicMock()
+    pr_mock = MagicMock()
+    file_a = MagicMock(filename="logo.png", changes=3)
+    file_a.patch = None
+    file_b = MagicMock(filename="empty.bin", changes=0)
+    file_b.patch = None
+    gh.get_repo.return_value = repo_mock
+    repo_mock.get_pull.return_value = pr_mock
+    pr_mock.get_files.return_value = [file_a, file_b]
+
+    client = GitHubClient(
+        github=gh,
+        repo_full_name="owner/repo",
+        pr_number=10,
+        head_sha="f" * 40,
+    )
+
+    assert [(f.path, f.line_ranges, f.patch) for f in client.changed_files] == [
+        ("logo.png", [(1, 3)], None),
+        ("empty.bin", [], None),
     ]

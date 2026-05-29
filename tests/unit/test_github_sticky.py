@@ -44,6 +44,28 @@ def test_find_sticky_comment_returns_none_when_no_marker() -> None:
     assert result is None
 
 
+def test_find_sticky_comment_ignores_non_bot_marker_when_bot_login_provided() -> None:
+    """Bot login filtering ignores human comments that contain the sticky marker."""
+    from coco_pr_review.github.sticky import find_sticky_comment
+
+    marker = "<!-- coco-pr-review:summary -->"
+
+    human_comment = MagicMock()
+    human_comment.body = f"Quoting the bot\n{marker}"
+    human_comment.user.login = "some-human-user"
+
+    bot_comment = MagicMock()
+    bot_comment.body = f"## Coco PR Review\n{marker}\n\nActual sticky"
+    bot_comment.user.login = "github-actions[bot]"
+
+    pr_mock = MagicMock()
+    pr_mock.get_issue_comments.return_value = [human_comment, bot_comment]
+
+    result = find_sticky_comment(pr_mock, bot_login="github-actions[bot]")
+
+    assert result is bot_comment
+
+
 # ---------------------------------------------------------------------------
 # upsert_sticky_comment — edit path
 # ---------------------------------------------------------------------------
@@ -87,6 +109,37 @@ def test_upsert_sticky_comment_creates_when_not_found() -> None:
     upsert_sticky_comment(pr_mock, new_body, sanitize_fn)
 
     pr_mock.create_issue_comment.assert_called_once()
+
+
+def test_upsert_sticky_comment_edits_bot_comment_when_human_marker_exists() -> None:
+    """Upsert targets the bot-authored sticky even if a human comment contains the marker."""
+    from coco_pr_review.github.sticky import upsert_sticky_comment
+
+    marker = "<!-- coco-pr-review:summary -->"
+
+    human_comment = MagicMock()
+    human_comment.body = f"Quoted summary\n{marker}"
+    human_comment.user.login = "some-human-user"
+
+    bot_comment = MagicMock()
+    bot_comment.body = f"Old sticky\n{marker}"
+    bot_comment.user.login = "github-actions[bot]"
+
+    pr_mock = MagicMock()
+    pr_mock.get_issue_comments.return_value = [human_comment, bot_comment]
+
+    sanitize_fn = MagicMock(side_effect=lambda body: body)
+
+    upsert_sticky_comment(
+        pr_mock,
+        "Updated sticky body",
+        sanitize_fn,
+        bot_login="github-actions[bot]",
+    )
+
+    bot_comment.edit.assert_called_once_with(body="Updated sticky body")
+    human_comment.edit.assert_not_called()
+    pr_mock.create_issue_comment.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

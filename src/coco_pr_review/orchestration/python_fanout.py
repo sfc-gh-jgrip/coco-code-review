@@ -310,22 +310,40 @@ class PythonFanoutOrchestrator(Orchestrator):
 
         # Build the list of coroutines for all reviewer×replica pairs.
         reviewer_coros = []
+        reviewer_replica_count = 0
         for reviewer in active_reviewers:
             n_replicas = replica_counts.get(reviewer.name, 1)
             for replica_idx in range(n_replicas):
                 reviewer_coros.append(_invoke_reviewer(reviewer, replica_idx))
+                reviewer_replica_count += 1
 
         # Gather with return_exceptions=True — failures are isolated.
         results = await asyncio.gather(*reviewer_coros, return_exceptions=True)
 
         # Collect all raw findings, logging failures.
         all_raw_findings: list[dict[str, Any]] = []
+        reviewer_exception_count = 0
+        reviewer_success_count = 0
         for r in results:
             if isinstance(r, BaseException):
                 logger.warning("Reviewer replica failed: %s", r)
                 progress.phase_completed("reviewer_replica_error", str(r))
+                reviewer_exception_count += 1
                 continue
+            reviewer_success_count += 1
             all_raw_findings.extend(r)
+
+        if reviewer_replica_count > 0 and reviewer_success_count == 0:
+            progress.phase_completed("reviewer_fanout", "all reviewer replicas failed")
+            return RunResult(
+                findings=[],
+                candidate_count=0,
+                deduped_count=0,
+                total_cost_usd=total_cost,
+                total_turns=total_turns,
+                aborted=True,
+                abort_reason="all reviewer replicas failed",
+            )
 
         candidate_count = len(all_raw_findings)
         progress.phase_completed("reviewer_fanout", f"{candidate_count} candidates")

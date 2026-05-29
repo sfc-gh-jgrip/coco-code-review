@@ -14,7 +14,11 @@ from github.Commit import Commit
 from github.PullRequest import PullRequest
 from github.Repository import Repository
 
+from coco_pr_review.github.diff import parse_hunk_ranges
 from coco_pr_review.orchestration.base import ChangedFile
+
+
+_DEFAULT_BOT_LOGIN = "github-actions[bot]"
 
 
 @dataclass
@@ -66,6 +70,11 @@ class GitHubClient:
         return getattr(user, "type", None) == "Bot"
 
     @cached_property
+    def bot_login(self) -> str:
+        """The bot login used when filtering bot-authored PR comments."""
+        return _DEFAULT_BOT_LOGIN
+
+    @cached_property
     def is_draft_pr(self) -> bool:
         """Whether the pull request is still marked as a draft."""
         return bool(getattr(self.pull_request, "draft", False))
@@ -81,11 +90,21 @@ class GitHubClient:
 
     @cached_property
     def changed_files(self) -> list[ChangedFile]:
-        """Changed files materialized into orchestrator-friendly dataclasses."""
-        return [
-            ChangedFile(
-                path=file.filename,
-                line_ranges=[(1, file.changes)] if getattr(file, "changes", 0) else [],
+        """Changed files materialized into orchestrator-friendly dataclasses.
+
+        Line ranges come from the patch hunk headers when a patch is present;
+        patchless files (e.g. binary blobs) fall back to a single whole-file
+        range derived from the reported change count.
+        """
+        changed_files: list[ChangedFile] = []
+        for file in self.pull_request.get_files():
+            patch = getattr(file, "patch", None)
+            if patch:
+                line_ranges = parse_hunk_ranges(patch)
+            else:
+                changes = getattr(file, "changes", 0)
+                line_ranges = [(1, changes)] if changes else []
+            changed_files.append(
+                ChangedFile(path=file.filename, line_ranges=line_ranges, patch=patch)
             )
-            for file in self.pull_request.get_files()
-        ]
+        return changed_files

@@ -1278,3 +1278,64 @@ async def test_config_drives_job_timeout() -> None:
     assert result.aborted is True
     assert result.abort_reason == "job timeout"
 
+
+@pytest.mark.asyncio
+async def test_all_reviewer_replicas_failing_aborts_run() -> None:
+    from coco_pr_review.orchestration.base import BudgetGate, NoOpProgressSink
+    from coco_pr_review.orchestration.python_fanout import PythonFanoutOrchestrator
+
+    async def fake_run_one_query(*, system_prompt: str, user_prompt: str, **_: Any) -> tuple[Any, Any]:
+        raise RuntimeError("reviewer exploded")
+
+    orch = PythonFanoutOrchestrator(run_one_query=fake_run_one_query)
+
+    result = await orch.run(
+        pr_context=_make_pr_context(),
+        reviewers=[_make_reviewer_spec()],
+        verifier=_make_verifier_spec(),
+        budget=BudgetGate(max_usd=10.0),
+        progress=NoOpProgressSink(),
+        replicas={"bugs-and-security": 2},
+    )
+
+    assert result.aborted is True
+    assert result.abort_reason == "all reviewer replicas failed"
+    assert result.candidate_count == 0
+    assert result.deduped_count == 0
+    assert result.findings == []
+
+
+@pytest.mark.asyncio
+async def test_reviewer_partial_failure_still_succeeds_when_one_replica_completes() -> None:
+    from coco_pr_review.orchestration.base import BudgetGate, NoOpProgressSink
+    from coco_pr_review.orchestration.python_fanout import PythonFanoutOrchestrator
+
+    calls = {"reviewer": 0}
+    finding = _make_finding(title="Real bug")
+
+    async def fake_run_one_query(*, system_prompt: str, user_prompt: str, **_: Any) -> tuple[Any, Any]:
+        if "verify" in system_prompt.lower():
+            return _make_verification(confidence=95), _FakeResult(cost=0.0, turns=0)
+
+        calls["reviewer"] += 1
+        if calls["reviewer"] == 1:
+            raise RuntimeError("first reviewer replica failed")
+        return {"findings": [finding]}, _FakeResult(cost=0.0, turns=0)
+
+    orch = PythonFanoutOrchestrator(run_one_query=fake_run_one_query)
+
+    result = await orch.run(
+        pr_context=_make_pr_context(),
+        reviewers=[_make_reviewer_spec()],
+        verifier=_make_verifier_spec(),
+        budget=BudgetGate(max_usd=10.0),
+        progress=NoOpProgressSink(),
+        replicas={"bugs-and-security": 2},
+    )
+
+    assert result.aborted is False
+    assert result.abort_reason is None
+    assert result.candidate_count == 1
+    assert result.deduped_count == 1
+    assert len(result.findings) == 1
+
