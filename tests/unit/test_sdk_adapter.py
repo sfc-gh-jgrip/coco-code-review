@@ -190,3 +190,80 @@ async def test_hard_sdk_error_is_not_retried(monkeypatch) -> None:
         await hard_fail()
 
     assert sleeps == []
+
+
+# ---------------------------------------------------------------------------
+# Tests: extract_json — fence/prose-tolerant JSON recovery
+# ---------------------------------------------------------------------------
+
+
+def test_extract_json_plain_object() -> None:
+    from coco_pr_review.orchestration.sdk_adapter import extract_json
+
+    assert extract_json('{"findings": []}') == {"findings": []}
+
+
+def test_extract_json_json_fenced() -> None:
+    from coco_pr_review.orchestration.sdk_adapter import extract_json
+
+    raw = '```json\n{"findings": [{"title": "bug"}]}\n```'
+    assert extract_json(raw) == {"findings": [{"title": "bug"}]}
+
+
+def test_extract_json_bare_fenced() -> None:
+    from coco_pr_review.orchestration.sdk_adapter import extract_json
+
+    raw = '```\n{"findings": []}\n```'
+    assert extract_json(raw) == {"findings": []}
+
+
+def test_extract_json_prose_preamble_then_fence() -> None:
+    from coco_pr_review.orchestration.sdk_adapter import extract_json
+
+    raw = (
+        "No conventions files exist in this repository, so there is nothing to flag.\n\n"
+        '```json\n{"findings": []}\n```'
+    )
+    assert extract_json(raw) == {"findings": []}
+
+
+def test_extract_json_brace_substring_fallback() -> None:
+    from coco_pr_review.orchestration.sdk_adapter import extract_json
+
+    raw = 'Here is the result: {"findings": [{"title": "x"}]} -- done.'
+    assert extract_json(raw) == {"findings": [{"title": "x"}]}
+
+
+def test_extract_json_raises_when_no_json() -> None:
+    import json
+
+    from coco_pr_review.orchestration.sdk_adapter import extract_json
+
+    with pytest.raises(json.JSONDecodeError):
+        extract_json("there is no json here at all")
+
+
+@pytest.mark.asyncio
+async def test_run_one_query_recovers_fenced_json_when_structured_output_missing() -> None:
+    """structured_output=None + fenced-JSON result → findings recovered, not dropped."""
+    from coco_pr_review.orchestration.sdk_adapter import run_one_query
+
+    finding = {
+        "file": "demo_bug.py",
+        "start_line": 10,
+        "end_line": 10,
+        "severity": "blocker",
+        "category": "correctness",
+        "title": "Division by zero when values list is empty",
+        "evidence": "    return total / len(values)",
+        "comment": "len(values) is 0 for an empty list.",
+    }
+    import json as _json
+
+    fenced = "```json\n" + _json.dumps({"findings": [finding]}) + "\n```"
+    ok_result = FakeResultMessage(is_error=False, structured_output=None, result=fenced)
+    stream = _fake_stream([FakeAssistantMessage(), ok_result])
+
+    output, _ = await run_one_query(message_stream=stream)
+
+    assert output == {"findings": [finding]}
