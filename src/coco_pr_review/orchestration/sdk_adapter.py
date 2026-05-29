@@ -11,9 +11,12 @@ Error classification uses the same subtypes as `coco_pr_review.retry`:
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, AsyncIterator
 
 from coco_pr_review.retry import classify_sdk_error
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -126,10 +129,26 @@ async def run_one_query(
         if raw is not None:
             try:
                 output = json.loads(raw)
+                logger.info(
+                    "structured_output missing; recovered findings from plaintext result JSON (len=%d).",
+                    len(raw) if isinstance(raw, str) else -1,
+                )
             except (json.JSONDecodeError, TypeError):
                 # Soft-fail: return empty dict → zero findings downstream.
+                preview = raw[:500] if isinstance(raw, str) else repr(raw)[:500]
+                logger.warning(
+                    "structured_output missing AND plaintext result is not valid JSON; "
+                    "soft-failing to zero findings. raw_result_preview=%r",
+                    preview,
+                )
                 output = {}
         else:
+            logger.warning(
+                "structured_output missing and result text is None; "
+                "soft-failing to zero findings (stop_reason=%s num_turns=%s).",
+                getattr(result_message, "stop_reason", None),
+                getattr(result_message, "num_turns", None),
+            )
             output = {}
 
     return (output, result_message)

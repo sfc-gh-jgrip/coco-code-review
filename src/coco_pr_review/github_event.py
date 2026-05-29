@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import asyncio
@@ -209,6 +210,11 @@ def resolve_event_context() -> tuple[str | None, str | None]:
 
 def main() -> int:
     """CLI entrypoint for GitHub Actions event dispatch."""
+    logging.basicConfig(
+        level=os.environ.get("COCO_PR_REVIEW_LOG_LEVEL", "INFO").upper(),
+        stream=sys.stdout,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
     repo_root = Path(os.environ.get("GITHUB_WORKSPACE", Path.cwd())).resolve()
     config_path = find_config(repo_root)
     config = load_config(config_path)
@@ -289,6 +295,23 @@ def main() -> int:
 
     if not isinstance(result, ReviewRunResult):
         return 1
-    if result.run_result is not None and getattr(result.run_result, "aborted", False):
+
+    run_result = result.run_result
+    if run_result is not None:
+        logging.getLogger("coco_pr_review").info(
+            "review finished: status=%s candidates=%s deduped=%s verified=%s "
+            "cost_usd=%s aborted=%s reason=%s",
+            result.status,
+            getattr(run_result, "candidate_count", None),
+            getattr(run_result, "deduped_count", None),
+            len(getattr(run_result, "findings", []) or []),
+            getattr(run_result, "total_cost_usd", None),
+            getattr(run_result, "aborted", None),
+            getattr(run_result, "abort_reason", None),
+        )
+    else:
+        logging.getLogger("coco_pr_review").info("review finished: status=%s (no run_result)", result.status)
+
+    if run_result is not None and getattr(run_result, "aborted", False):
         return 1
     return 0
