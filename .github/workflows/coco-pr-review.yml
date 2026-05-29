@@ -75,3 +75,13 @@ jobs:
           SNOWFLAKE_HOST: ${{ vars.SNOWFLAKE_HOST }}
           SNOWFLAKE_DEFAULT_CONNECTION_NAME: default
         run: python -m coco_pr_review
+
+      - name: Dump Cortex Code logs
+        if: failure()
+        run: |
+          echo "=== cortex logs path ==="
+          cortex logs path || true
+          echo "=== cortex logs errors ==="
+          cortex logs errors -n 200 --all-rotations || true
+          echo "=== cortex logs tail ==="
+          cortex logs tail || true

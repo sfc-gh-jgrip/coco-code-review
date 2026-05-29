@@ -112,7 +112,7 @@ jobs:
         run: python -m coco_pr_review
 
       - name: Dump Cortex Code logs
-        if: always()
+        if: failure()
         run: |
           echo "=== cortex logs path ==="
           cortex logs path || true
