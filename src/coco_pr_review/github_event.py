@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import asyncio
 from contextlib import aclosing
 from dataclasses import dataclass
@@ -226,6 +227,11 @@ def main() -> int:
     verifier = parse_agent_md(reviewers_dir / "verifier.md")
 
     async def run_one_query_with_sdk(*, system_prompt: str, user_prompt: str, **_: Any) -> tuple[Any, Any]:
+        # Forward the cortex CLI subprocess stderr to our stderr so that
+        # SDK-level execution errors are visible in CI logs.
+        def _on_stderr(line: str) -> None:
+            print(f"[cortex-sdk] {line}", file=sys.stderr, flush=True)
+
         # Close the SDK async generator in the same task that iterates it.
         # Otherwise GC-time cleanup of query()'s internal anyio task group raises
         # "Attempted to exit cancel scope in a different task than it was entered in".
@@ -235,6 +241,7 @@ def main() -> int:
                 options=CortexCodeAgentOptions(
                     cwd=str(repo_root),
                     append_system_prompt=system_prompt,
+                    stderr=_on_stderr,
                 ),
             )
         ) as message_stream:
