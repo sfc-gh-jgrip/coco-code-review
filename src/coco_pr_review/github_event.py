@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import asyncio
+from contextlib import aclosing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -225,14 +226,19 @@ def main() -> int:
     verifier = parse_agent_md(reviewers_dir / "verifier.md")
 
     async def run_one_query_with_sdk(*, system_prompt: str, user_prompt: str, **_: Any) -> tuple[Any, Any]:
-        message_stream = query(
-            prompt=user_prompt,
-            options=CortexCodeAgentOptions(
-                cwd=str(repo_root),
-                append_system_prompt=system_prompt,
-            ),
-        )
-        return await run_one_query(message_stream=message_stream)
+        # Close the SDK async generator in the same task that iterates it.
+        # Otherwise GC-time cleanup of query()'s internal anyio task group raises
+        # "Attempted to exit cancel scope in a different task than it was entered in".
+        async with aclosing(
+            query(
+                prompt=user_prompt,
+                options=CortexCodeAgentOptions(
+                    cwd=str(repo_root),
+                    append_system_prompt=system_prompt,
+                ),
+            )
+        ) as message_stream:
+            return await run_one_query(message_stream=message_stream)
 
     orchestrator = PythonFanoutOrchestrator(run_one_query=run_one_query_with_sdk, config=config)
     github = Github(auth=Auth.Token(os.environ["GITHUB_TOKEN"]))
