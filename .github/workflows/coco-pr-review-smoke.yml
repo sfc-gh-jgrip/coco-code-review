@@ -93,6 +93,9 @@ jobs:
         env:
           SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT }}
           SNOWFLAKE_HOST: ${{ vars.SNOWFLAKE_HOST }}
+          SNOWFLAKE_USER: ${{ vars.SNOWFLAKE_USER }}
+          SNOWFLAKE_ROLE: ${{ vars.SNOWFLAKE_ROLE }}
+          SNOWFLAKE_WAREHOUSE: ${{ vars.SNOWFLAKE_WAREHOUSE }}
         run: |
           set -euo pipefail
           oidc_token="$(curl -sS \
@@ -108,9 +111,9 @@ jobs:
           [default]
           account = "$SNOWFLAKE_ACCOUNT"
           host = "$SNOWFLAKE_HOST"
-          user = "SVC_COCO_REVIEW"
-          role = "COCO_REVIEWER"
-          warehouse = "XS_WH"
+          user = "$SNOWFLAKE_USER"
+          role = "$SNOWFLAKE_ROLE"
+          warehouse = "$SNOWFLAKE_WAREHOUSE"
           authenticator = "WORKLOAD_IDENTITY"
           workload_identity_provider = "OIDC"
           token = "$oidc_token"
