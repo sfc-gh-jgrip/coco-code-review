@@ -101,6 +101,15 @@ async def run_one_query(
             if msg.is_error:
                 subtype = getattr(msg, "subtype", "unknown") or "unknown"
                 detail = getattr(msg, "result", None)
+                if not detail:
+                    # The result text is often empty for execution errors; fall
+                    # back to the richer fields so the real cause is visible.
+                    detail = (
+                        f"stop_reason={getattr(msg, 'stop_reason', None)} "
+                        f"permission_denials={getattr(msg, 'permission_denials', None)} "
+                        f"num_turns={getattr(msg, 'num_turns', None)} "
+                        f"duration_ms={getattr(msg, 'duration_ms', None)}"
+                    )
                 _raise_classified(subtype, detail)
             # Success terminal message.
             result_message = msg
