@@ -2,6 +2,12 @@
 
 Used as `output_format={"type": "json_schema", "schema": FINDING_SCHEMA}` when
 dispatching reviewer and verifier subagents via the SDK.
+
+Note: these intentionally omit the ``$schema`` meta-schema declaration. The
+Cortex CLI's structured-output validator tries to resolve a ``$schema`` URI as
+a remote reference and fails with ``no schema with key or ref "..."``; leaving
+it out keeps the schema usable both by the CLI and by ``jsonschema.validate``
+(which defaults to the latest draft).
 """
 from __future__ import annotations
 
@@ -12,7 +18,6 @@ CATEGORIES = ("correctness", "security", "perf", "style", "test")
 
 
 FINDING_SCHEMA: dict[str, Any] = {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "additionalProperties": False,
     "required": [
@@ -56,7 +61,6 @@ REVIEWER_OUTPUT_SCHEMA: dict[str, Any] = {
 
 
 VERIFIER_OUTPUT_SCHEMA: dict[str, Any] = {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
     "additionalProperties": False,
     "required": ["confidence", "evidence_matches", "lines_in_pr", "verifier_reasoning"],

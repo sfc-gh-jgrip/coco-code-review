@@ -118,3 +118,30 @@ def test_verifier_output_schema_rejects_missing_evidence_matches() -> None:
 
     with pytest.raises(jsonschema.ValidationError, match="evidence_matches"):
         jsonschema.validate(instance=bogus, schema=VERIFIER_OUTPUT_SCHEMA)
+
+
+def test_schemas_omit_dollar_schema_for_cli_compatibility() -> None:
+    """No schema may carry a ``$schema`` meta-ref.
+
+    The Cortex CLI's structured-output validator fails to resolve a ``$schema``
+    URI (``no schema with key or ref "..."``), which silently dropped every
+    verifier result in production. Guard against reintroducing it anywhere,
+    including nested subschemas.
+    """
+    from coco_pr_review.schema import (
+        FINDING_SCHEMA,
+        REVIEWER_OUTPUT_SCHEMA,
+        VERIFIER_OUTPUT_SCHEMA,
+    )
+
+    def _assert_no_dollar_schema(node: object) -> None:
+        if isinstance(node, dict):
+            assert "$schema" not in node, f"$schema must not appear in CLI schema: {node!r}"
+            for value in node.values():
+                _assert_no_dollar_schema(value)
+        elif isinstance(node, list):
+            for item in node:
+                _assert_no_dollar_schema(item)
+
+    for schema in (FINDING_SCHEMA, REVIEWER_OUTPUT_SCHEMA, VERIFIER_OUTPUT_SCHEMA):
+        _assert_no_dollar_schema(schema)
