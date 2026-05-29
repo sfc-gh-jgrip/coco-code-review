@@ -292,6 +292,7 @@ class PythonFanoutOrchestrator(Orchestrator):
             output, result = await self._run_one_query(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
+                output_schema=REVIEWER_OUTPUT_SCHEMA,
             )
             # Register cost and turns.
             cost = getattr(result, "total_cost_usd", None) or 0
@@ -429,6 +430,7 @@ class PythonFanoutOrchestrator(Orchestrator):
             output, result = await self._run_one_query(
                 system_prompt=verifier.system_prompt,
                 user_prompt=v_user_prompt,
+                output_schema=VERIFIER_OUTPUT_SCHEMA,
             )
             # Register cost and turns.
             cost = getattr(result, "total_cost_usd", None) or 0

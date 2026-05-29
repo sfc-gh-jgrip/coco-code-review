@@ -138,6 +138,7 @@ def _make_finding(*, title: str = "Use safer API", evidence: str = "line content
         start_line=10,
         end_line=10,
         title=title,
+        category="correctness",
         comment="This should change.",
         evidence=evidence,
         severity="warning",

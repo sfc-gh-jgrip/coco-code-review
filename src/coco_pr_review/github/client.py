@@ -35,12 +35,17 @@ class GitHubClient:
         Pull request number (integer).
     head_sha:
         Full 40-char SHA of the PR head commit.
+    bot_login:
+        Login used when filtering bot-authored PR comments. Defaults to
+        ``github-actions[bot]``; overridden when running under a GitHub App
+        (e.g. ``coco-pr-review[bot]``).
     """
 
     github: Github
     repo_full_name: str
     pr_number: int
     head_sha: str
+    bot_login: str = _DEFAULT_BOT_LOGIN
 
     @cached_property
     def repo(self) -> Repository:
@@ -68,11 +73,6 @@ class GitHubClient:
         """Whether the PR author is a bot account."""
         user = getattr(self.pull_request, "user", None)
         return getattr(user, "type", None) == "Bot"
-
-    @cached_property
-    def bot_login(self) -> str:
-        """The bot login used when filtering bot-authored PR comments."""
-        return _DEFAULT_BOT_LOGIN
 
     @cached_property
     def is_draft_pr(self) -> bool:

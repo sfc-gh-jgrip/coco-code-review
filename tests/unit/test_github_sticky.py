@@ -194,6 +194,90 @@ def test_render_sticky_progress_contains_finding_count() -> None:
     assert "5" in body
 
 
+def _make_finding(
+    *,
+    severity: str,
+    title: str,
+    file: str,
+    start_line: int,
+    category: str,
+):
+    """Build a minimal Finding for sticky-render tests."""
+    from coco_pr_review.orchestration.base import Finding
+
+    return Finding(
+        file=file,
+        start_line=start_line,
+        end_line=start_line,
+        severity=severity,
+        category=category,
+        title=title,
+        evidence="evidence",
+        comment="comment",
+    )
+
+
+def test_render_sticky_final_lists_findings_with_title_and_location() -> None:
+    """The final sticky lists each finding's title, file:line, and category."""
+    from coco_pr_review.github.sticky import render_sticky_final
+
+    findings = [
+        _make_finding(
+            severity="blocker",
+            title="Null deref on empty list",
+            file="demo_bug.py",
+            start_line=10,
+            category="correctness",
+        ),
+        _make_finding(
+            severity="nit",
+            title="Prefer f-string",
+            file="util.py",
+            start_line=3,
+            category="style",
+        ),
+    ]
+
+    body = render_sticky_final(findings=findings, posted=2, skipped=0)
+
+    assert "### Findings" in body
+    assert "Null deref on empty list" in body
+    assert "`demo_bug.py:10`" in body
+    assert "(correctness)" in body
+    assert "Prefer f-string" in body
+    assert "`util.py:3`" in body
+    # Severity table still present.
+    assert "| 🔴 blocker | 1 |" in body
+
+
+def test_render_sticky_final_orders_blocker_before_nit() -> None:
+    """Findings are listed blocker → warning → nit regardless of input order."""
+    from coco_pr_review.github.sticky import render_sticky_final
+
+    findings = [
+        _make_finding(
+            severity="nit", title="Nit one", file="a.py", start_line=1, category="style"
+        ),
+        _make_finding(
+            severity="blocker", title="Blocker one", file="b.py", start_line=2, category="security"
+        ),
+    ]
+
+    body = render_sticky_final(findings=findings, posted=2, skipped=0)
+
+    assert body.index("Blocker one") < body.index("Nit one")
+
+
+def test_render_sticky_final_omits_findings_section_when_empty() -> None:
+    """With zero findings, no Findings list is appended."""
+    from coco_pr_review.github.sticky import render_sticky_final
+
+    body = render_sticky_final(findings=[], posted=0, skipped=0)
+
+    assert "### Findings" not in body
+    assert "0 total findings" in body
+
+
 def test_render_sticky_skipped_mentions_reason() -> None:
     """Skip sticky rendering includes the shared marker and reason text."""
     from coco_pr_review.github.sticky import render_sticky_skipped

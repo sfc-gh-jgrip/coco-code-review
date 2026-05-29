@@ -28,6 +28,11 @@ from coco_pr_review.sanitize import redact
 TRIGGER_MENTION = "@coco-review"
 ALLOWED_AUTHOR_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
 
+# Login used to find/filter bot-authored comments. Defaults to the
+# GITHUB_TOKEN identity in Actions; a GitHub App run overrides it via the
+# COCO_BOT_LOGIN env var (e.g. "coco-pr-review[bot]").
+DEFAULT_BOT_LOGIN = "github-actions[bot]"
+
 
 class UnsupportedGitHubEventError(ValueError):
     """Raised when the current GitHub event cannot trigger a review."""
@@ -132,6 +137,7 @@ def build_github_client(
     event: PullRequestEvent | IssueCommentEvent,
     github: Github | None = None,
     github_token: str | None = None,
+    bot_login: str = DEFAULT_BOT_LOGIN,
 ) -> GitHubClient:
     """Construct a GitHub client for the event using the latest PR head SHA."""
     resolved_github = github
@@ -150,6 +156,7 @@ def build_github_client(
         repo_full_name=event.repo_full_name,
         pr_number=event.pr_number,
         head_sha=head_sha,
+        bot_login=bot_login,
     )
 
 
@@ -171,13 +178,16 @@ async def run_github_event(
     event_path: str | os.PathLike[str] | None = None,
     github: Github | None = None,
     github_token: str | None = None,
+    bot_login: str = DEFAULT_BOT_LOGIN,
 ) -> ReviewRunResult:
     """Dispatch a supported GitHub event into the review runner."""
     event = parse_github_event(event_name=event_name, payload=payload, event_path=event_path)
     if isinstance(event, IssueCommentEvent) and not is_comment_review_trigger(event):
         raise UnsupportedGitHubEventError("issue_comment event is not an allowed @coco-review trigger")
 
-    github_client = build_github_client(event=event, github=github, github_token=github_token)
+    github_client = build_github_client(
+        event=event, github=github, github_token=github_token, bot_login=bot_login
+    )
     return await run_review(
         repo_root=repo_root,
         github_client=github_client,
@@ -232,11 +242,26 @@ def main() -> int:
     ]
     verifier = parse_agent_md(reviewers_dir / "verifier.md")
 
-    async def run_one_query_with_sdk(*, system_prompt: str, user_prompt: str, **_: Any) -> tuple[Any, Any]:
+    async def run_one_query_with_sdk(
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        output_schema: dict[str, Any] | None = None,
+        **_: Any,
+    ) -> tuple[Any, Any]:
         # Forward the cortex CLI subprocess stderr to our stderr so that
         # SDK-level execution errors are visible in CI logs.
         def _on_stderr(line: str) -> None:
             print(f"[cortex-sdk] {line}", file=sys.stderr, flush=True)
+
+        # Request structured output via JSON schema when the caller supplies one.
+        # This makes the CLI emit `--json-schema`, populating ResultMessage
+        # `structured_output` directly (no fence/prose recovery needed).
+        output_format = (
+            {"type": "json_schema", "schema": output_schema}
+            if output_schema is not None
+            else None
+        )
 
         # Close the SDK async generator in the same task that iterates it.
         # Otherwise GC-time cleanup of query()'s internal anyio task group raises
@@ -248,6 +273,7 @@ def main() -> int:
                     cwd=str(repo_root),
                     append_system_prompt=system_prompt,
                     stderr=_on_stderr,
+                    output_format=output_format,
                 ),
             )
         ) as message_stream:
@@ -265,12 +291,14 @@ def main() -> int:
         event_name, event_path = resolve_event_context()
         payload = load_event_payload(event_path)
         event = parse_github_event(event_name=event_name, payload=payload, event_path=event_path)
+        bot_login = os.environ.get("COCO_BOT_LOGIN", DEFAULT_BOT_LOGIN)
         publisher = Publisher(
             github=github,
             repo_full_name=event.repo_full_name,
             pr_number=event.pr_number,
             head_sha=event.head_sha if isinstance(event, PullRequestEvent) else github.get_repo(event.repo_full_name).get_pull(event.pr_number).head.sha,
             sanitize_fn=redact,
+            bot_login=bot_login,
         )
         result = asyncio.run(
             run_github_event(
@@ -287,6 +315,7 @@ def main() -> int:
                 payload=payload,
                 event_name=event_name,
                 github=github,
+                bot_login=bot_login,
             )
         )
     except UnsupportedGitHubEventError as exc:

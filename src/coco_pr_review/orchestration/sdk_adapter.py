@@ -170,7 +170,7 @@ async def run_one_query(
         if raw is not None:
             try:
                 output = extract_json(raw)
-                logger.info(
+                logger.debug(
                     "structured_output missing; recovered JSON from plaintext result "
                     "(fence/prose tolerant, raw_len=%d).",
                     len(raw) if isinstance(raw, str) else -1,

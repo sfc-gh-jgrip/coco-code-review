@@ -1339,3 +1339,39 @@ async def test_reviewer_partial_failure_still_succeeds_when_one_replica_complete
     assert result.deduped_count == 1
     assert len(result.findings) == 1
 
+
+@pytest.mark.asyncio
+async def test_output_schema_forwarded_to_run_one_query() -> None:
+    """Reviewer calls forward REVIEWER_OUTPUT_SCHEMA; verifier calls forward VERIFIER_OUTPUT_SCHEMA."""
+    from coco_pr_review.orchestration.base import BudgetGate, NoOpProgressSink
+    from coco_pr_review.orchestration.python_fanout import PythonFanoutOrchestrator
+    from coco_pr_review.schema import REVIEWER_OUTPUT_SCHEMA, VERIFIER_OUTPUT_SCHEMA
+
+    captured: list[tuple[str, Any]] = []
+
+    async def fake_run_one_query(
+        *, system_prompt: str, user_prompt: str, output_schema: Any = None, **kwargs: Any
+    ) -> tuple[Any, Any]:
+        if "verify" in system_prompt.lower():
+            captured.append(("verifier", output_schema))
+            return _make_verification(confidence=90), _FakeResult(cost=0.0, turns=1)
+        captured.append(("reviewer", output_schema))
+        return {"findings": [_make_finding(title="Schema bug")]}, _FakeResult(cost=0.0, turns=1)
+
+    orch = PythonFanoutOrchestrator(run_one_query=fake_run_one_query)
+    await orch.run(
+        pr_context=_make_pr_context(),
+        reviewers=[_make_reviewer_spec()],
+        verifier=_make_verifier_spec(),
+        budget=BudgetGate(max_usd=10.0),
+        progress=NoOpProgressSink(),
+    )
+
+    reviewer_schemas = [schema for role, schema in captured if role == "reviewer"]
+    verifier_schemas = [schema for role, schema in captured if role == "verifier"]
+
+    assert reviewer_schemas, "expected at least one reviewer call"
+    assert verifier_schemas, "expected at least one verifier call"
+    assert all(schema is REVIEWER_OUTPUT_SCHEMA for schema in reviewer_schemas)
+    assert all(schema is VERIFIER_OUTPUT_SCHEMA for schema in verifier_schemas)
+

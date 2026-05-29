@@ -90,8 +90,11 @@ def render_sticky_final(
 ) -> str:
     """Render the final sticky comment body after publishing.
 
-    Includes the summary marker and a severity breakdown table.
+    Includes the summary marker, a severity breakdown table, and a per-finding
+    list (title, location, category) so reviewers can see what was flagged
+    without scrolling through inline comments.
     """
+    severity_emoji = {"blocker": "🔴", "warning": "🟡", "nit": "⚪"}
     blocker_count = sum(1 for f in findings if f.severity == "blocker")
     warning_count = sum(1 for f in findings if f.severity == "warning")
     nit_count = sum(1 for f in findings if f.severity == "nit")
@@ -112,6 +115,17 @@ def render_sticky_final(
         "",
         f"{total} total findings · {posted} posted · {skipped} skipped (duplicates)",
     ]
+
+    if findings:
+        # Sort blocker → warning → nit so the most important findings lead.
+        severity_rank = {"blocker": 0, "warning": 1, "nit": 2}
+        ordered = sorted(findings, key=lambda f: severity_rank.get(f.severity, 3))
+        lines.extend(["", "### Findings"])
+        for finding in ordered:
+            emoji = severity_emoji.get(finding.severity, "⚪")
+            location = f"`{finding.file}:{finding.start_line}`"
+            lines.append(f"- {emoji} **{finding.title}** — {location} ({finding.category})")
+
     return "\n".join(lines)
 
 

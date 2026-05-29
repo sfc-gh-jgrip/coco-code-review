@@ -64,9 +64,18 @@ jobs:
           role: ${{ vars.SNOWFLAKE_ROLE }}
           warehouse: ${{ vars.SNOWFLAKE_WAREHOUSE }}
 
+      - name: Mint Coco App token
+        id: app-token
+        if: ${{ vars.COCO_APP_ID != '' }}
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.COCO_APP_ID }}
+          private-key: ${{ secrets.COCO_APP_PRIVATE_KEY }}
+
       - name: Run Coco PR review
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          COCO_BOT_LOGIN: ${{ steps.app-token.outputs.app-slug && format('{0}[bot]', steps.app-token.outputs.app-slug) || 'github-actions[bot]' }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           GITHUB_EVENT_PATH: ${{ github.event_path }}
           GITHUB_REPOSITORY: ${{ github.repository }}
