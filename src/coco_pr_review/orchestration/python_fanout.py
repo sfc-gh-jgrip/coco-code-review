@@ -18,6 +18,8 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Awaitable
 
+import jsonschema
+
 from coco_pr_review.config import CocoPRReviewConfig, DEFAULT_CONFIG, ReviewerOverride
 from coco_pr_review.orchestration.base import (
     BudgetGate,
@@ -303,47 +305,45 @@ class PythonFanoutOrchestrator(Orchestrator):
             total_cost += cost
             total_turns += turns
 
-            # Parse structured output.
-            if output is None:
-                # run_one_query soft-failed → zero findings for this replica.
-                logger.warning(
-                    "Reviewer %s replica %d returned None structured output; treating as zero findings.",
-                    reviewer.name,
-                    _replica_idx,
-                )
-                return []
+            # Defensive cap BEFORE validation: the config may tighten the per
+            # reviewer finding count below the schema's maxItems, and the
+            # server-side maxItems is the primary guard. Capping first keeps an
+            # over-count reviewer's first N findings useful instead of discarding
+            # the whole replica on a pure quantity overflow. We only touch the
+            # findings list — any other (disallowed) keys are preserved so the
+            # schema's additionalProperties=False still flags them below.
+            if isinstance(output, dict) and isinstance(output.get("findings"), list):
+                output = {
+                    **output,
+                    "findings": output["findings"][:max_findings_per_replica],
+                }
 
-            # Expect {"findings": [...]}.
-            findings_list = output.get("findings", []) if isinstance(output, dict) else []
-            if not isinstance(output, dict):
+            # Validate against the reviewer output schema (second gate, defense
+            # in depth over the SDK's own schema enforcement). A structural
+            # validation failure is a DEGRADED replica, never a clean "zero
+            # findings" — we raise so the surrounding gather counts it as a
+            # failed replica rather than silently contributing zero candidates.
+            try:
+                jsonschema.validate(instance=output, schema=REVIEWER_OUTPUT_SCHEMA)
+            except jsonschema.ValidationError as exc:
                 logger.warning(
-                    "Reviewer %s replica %d: output is %s, not a dict; treating as zero findings.",
+                    "Reviewer %s replica %d: structured output failed schema "
+                    "validation (%s); counting as a failed replica.",
                     reviewer.name,
                     _replica_idx,
-                    type(output).__name__,
+                    exc.message,
                 )
-            elif not output:
-                logger.warning(
-                    "Reviewer %s replica %d: output is an empty dict (SDK soft-fail); zero findings.",
-                    reviewer.name,
-                    _replica_idx,
-                )
-            elif "findings" not in output:
-                logger.warning(
-                    "Reviewer %s replica %d: output has no 'findings' key (keys=%s); zero findings.",
-                    reviewer.name,
-                    _replica_idx,
-                    list(output.keys()),
-                )
-            else:
-                logger.info(
-                    "Reviewer %s replica %d: %d raw finding(s).",
-                    reviewer.name,
-                    _replica_idx,
-                    len(findings_list),
-                )
-            # Defensive cap (server-side maxItems is the primary guard).
-            return findings_list[:max_findings_per_replica]
+                raise
+
+            # Schema guarantees a dict with a "findings" array (possibly empty).
+            findings_list = output["findings"]
+            logger.info(
+                "Reviewer %s replica %d: %d raw finding(s).",
+                reviewer.name,
+                _replica_idx,
+                len(findings_list),
+            )
+            return findings_list
 
         # Build the list of coroutines for all reviewer×replica pairs.
         reviewer_coros = []
@@ -441,7 +441,19 @@ class PythonFanoutOrchestrator(Orchestrator):
             total_cost += cost
             total_turns += turns
 
-            if output is None or not isinstance(output, dict):
+            # Validate against the verifier output schema (second gate). On
+            # failure, return None → the candidate is dropped as `unparseable`,
+            # a distinct, counted bucket. This is deliberately NOT treated as a
+            # confidence-0 verdict (which would mislabel an infra/parse failure
+            # as `low_confidence` and silently swallow it).
+            try:
+                jsonschema.validate(instance=output, schema=VERIFIER_OUTPUT_SCHEMA)
+            except jsonschema.ValidationError as exc:
+                logger.warning(
+                    "Verifier output failed schema validation (%s); "
+                    "dropping candidate as unparseable.",
+                    exc.message,
+                )
                 return None
 
             return (candidate, output)
@@ -516,4 +528,5 @@ class PythonFanoutOrchestrator(Orchestrator):
             total_turns=total_turns,
             aborted=False,
             abort_reason=None,
+            reviewer_failures=reviewer_exception_count,
         )

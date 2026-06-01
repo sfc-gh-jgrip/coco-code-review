@@ -248,6 +248,7 @@ class Publisher:
                 findings=run_result.findings,
                 posted=comments_posted,
                 skipped=len(skipped_findings),
+                reviewer_failures=getattr(run_result, "reviewer_failures", 0) or 0,
             )
             sticky_comment = upsert_sticky_comment(pr, sticky_body, self._sanitize_fn, bot_login=self._bot_login)
             sticky_comment_id = getattr(sticky_comment, "id", None) or 0

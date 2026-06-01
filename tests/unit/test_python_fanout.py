@@ -231,7 +231,7 @@ async def test_candidate_cap_truncates_to_20() -> None:
 
     # 25 unique findings
     many_findings = [
-        _make_finding(title=f"Bug {i}", start_line=i, end_line=i + 1)
+        _make_finding(title=f"Bug {i}", start_line=i + 1, end_line=i + 2)
         for i in range(25)
     ]
 
@@ -292,7 +292,7 @@ async def test_confidence_filter_drops_below_threshold() -> None:
     )
 
     findings = [
-        _make_finding(title=f"Bug {i}", start_line=i * 10, end_line=i * 10 + 2)
+        _make_finding(title=f"Bug {i}", start_line=i * 10 + 1, end_line=i * 10 + 2)
         for i in range(4)
     ]
 
@@ -829,8 +829,75 @@ async def test_total_cost_usd_none_does_not_crash() -> None:
 
 
 @pytest.mark.asyncio
-async def test_structured_output_none_treated_as_zero_findings() -> None:
-    """run_one_query returns (None, result) → orchestrator treats as zero findings."""
+async def test_reviewer_invalid_output_counts_as_failed_replica_not_silent_zero() -> None:
+    """A schema-invalid reviewer replica is a counted failure, not a silent zero.
+
+    With 2 replicas where one returns valid findings and the other returns
+    schema-invalid output, the good replica's candidate survives and the bad
+    one is recorded in ``reviewer_failures`` (the run is NOT aborted because at
+    least one replica succeeded).
+    """
+    from coco_pr_review.orchestration.base import (
+        BudgetGate,
+        NoOpProgressSink,
+        PullRequestContext,
+    )
+    from coco_pr_review.orchestration.python_fanout import PythonFanoutOrchestrator
+    from coco_pr_review.reviewer_spec import ReviewerSpec
+
+    reviewer = ReviewerSpec(
+        name="bugs-and-security",
+        description="Finds bugs",
+        model="claude-sonnet-4-6",
+        tools=["Read", "Glob", "Grep"],
+        system_prompt="You find bugs.",
+    )
+    verifier = ReviewerSpec(
+        name="verifier",
+        description="Verifies",
+        model="claude-opus-4-6",
+        tools=["Read", "Glob", "Grep"],
+        system_prompt="You verify.",
+    )
+
+    reviewer_call_idx = 0
+
+    async def fake_run_one_query(*, system_prompt: str, user_prompt: str, **kwargs: Any) -> tuple[Any, Any]:
+        nonlocal reviewer_call_idx
+        if "verify" in system_prompt.lower():
+            return _make_verification(confidence=95), _FakeResult(cost=0.001, turns=1)
+        reviewer_call_idx += 1
+        if reviewer_call_idx == 1:
+            return {"findings": [_make_finding(title="Real bug")]}, _FakeResult(cost=0.01, turns=2)
+        # Second replica: schema-invalid (missing required "findings" key).
+        return {"not_findings": True}, _FakeResult(cost=0.01, turns=2)
+
+    orch = PythonFanoutOrchestrator(run_one_query=fake_run_one_query)
+    pr_context = PullRequestContext(
+        repo_root=Path("/tmp/fake"),
+        changed_files=[],
+        unified_diff=None,
+        conventions_text=None,
+    )
+
+    result = await orch.run(
+        pr_context=pr_context,
+        reviewers=[reviewer],
+        verifier=verifier,
+        budget=BudgetGate(max_usd=10.0),
+        progress=NoOpProgressSink(),
+        replicas={"bugs-and-security": 2},
+    )
+
+    assert result.aborted is False
+    assert result.candidate_count == 1  # only the good replica contributed
+    assert result.reviewer_failures == 1  # the invalid replica is counted
+    assert len(result.findings) == 1
+
+
+@pytest.mark.asyncio
+async def test_all_reviewer_replicas_invalid_aborts() -> None:
+    """When every reviewer replica emits unusable output, the run fails closed."""
     from coco_pr_review.orchestration.base import (
         BudgetGate,
         NoOpProgressSink,
@@ -857,7 +924,7 @@ async def test_structured_output_none_treated_as_zero_findings() -> None:
     async def fake_run_one_query(*, system_prompt: str, user_prompt: str, **kwargs: Any) -> tuple[Any, Any]:
         if "verify" in system_prompt.lower():
             return _make_verification(confidence=90), _FakeResult(cost=0.001, turns=1)
-        # Reviewer returns None structured output (parse failure in SDK).
+        # None is not a valid reviewer output and fails schema validation.
         return None, _FakeResult(cost=0.01, turns=2)
 
     orch = PythonFanoutOrchestrator(run_one_query=fake_run_one_query)
@@ -876,10 +943,127 @@ async def test_structured_output_none_treated_as_zero_findings() -> None:
         progress=NoOpProgressSink(),
     )
 
-    # Zero findings — reviewer's output was None.
+    # Fail closed: an unparseable reviewer is NOT a clean "zero findings".
+    assert result.aborted is True
+    assert result.abort_reason == "all reviewer replicas failed"
     assert len(result.findings) == 0
-    assert result.candidate_count == 0
+
+
+@pytest.mark.asyncio
+async def test_reviewer_empty_findings_is_clean_zero_not_aborted() -> None:
+    """A valid ``{"findings": []}`` is a genuine clean review, not a failure."""
+    from coco_pr_review.orchestration.base import (
+        BudgetGate,
+        NoOpProgressSink,
+        PullRequestContext,
+    )
+    from coco_pr_review.orchestration.python_fanout import PythonFanoutOrchestrator
+    from coco_pr_review.reviewer_spec import ReviewerSpec
+
+    reviewer = ReviewerSpec(
+        name="bugs-and-security",
+        description="Finds bugs",
+        model="claude-sonnet-4-6",
+        tools=["Read", "Glob", "Grep"],
+        system_prompt="You find bugs.",
+    )
+    verifier = ReviewerSpec(
+        name="verifier",
+        description="Verifies",
+        model="claude-opus-4-6",
+        tools=["Read", "Glob", "Grep"],
+        system_prompt="You verify.",
+    )
+
+    async def fake_run_one_query(*, system_prompt: str, user_prompt: str, **kwargs: Any) -> tuple[Any, Any]:
+        if "verify" in system_prompt.lower():
+            return _make_verification(confidence=90), _FakeResult(cost=0.001, turns=1)
+        return {"findings": []}, _FakeResult(cost=0.01, turns=2)
+
+    orch = PythonFanoutOrchestrator(run_one_query=fake_run_one_query)
+    pr_context = PullRequestContext(
+        repo_root=Path("/tmp/fake"),
+        changed_files=[],
+        unified_diff=None,
+        conventions_text=None,
+    )
+
+    result = await orch.run(
+        pr_context=pr_context,
+        reviewers=[reviewer],
+        verifier=verifier,
+        budget=BudgetGate(max_usd=10.0),
+        progress=NoOpProgressSink(),
+    )
+
     assert result.aborted is False
+    assert result.candidate_count == 0
+    assert result.reviewer_failures == 0
+    assert len(result.findings) == 0
+
+
+@pytest.mark.asyncio
+async def test_verifier_invalid_output_dropped_as_unparseable_not_low_confidence(
+    caplog: Any,
+) -> None:
+    """A schema-invalid verifier verdict drops the finding as `unparseable`.
+
+    Regression guard: previously an empty/invalid verifier dict slipped past the
+    ``isinstance(dict)`` check, defaulted ``confidence`` to 0, and was mislabeled
+    as a ``low_confidence`` drop — silently swallowing an infra/parse failure.
+    """
+    import logging
+
+    from coco_pr_review.orchestration.base import (
+        BudgetGate,
+        NoOpProgressSink,
+        PullRequestContext,
+    )
+    from coco_pr_review.orchestration.python_fanout import PythonFanoutOrchestrator
+    from coco_pr_review.reviewer_spec import ReviewerSpec
+
+    reviewer = ReviewerSpec(
+        name="bugs-and-security",
+        description="Finds bugs",
+        model="claude-sonnet-4-6",
+        tools=["Read", "Glob", "Grep"],
+        system_prompt="You find bugs.",
+    )
+    verifier = ReviewerSpec(
+        name="verifier",
+        description="Verifies",
+        model="claude-opus-4-6",
+        tools=["Read", "Glob", "Grep"],
+        system_prompt="You verify.",
+    )
+
+    async def fake_run_one_query(*, system_prompt: str, user_prompt: str, **kwargs: Any) -> tuple[Any, Any]:
+        if "verify" in system_prompt.lower():
+            # Invalid verifier verdict — missing all required keys.
+            return {}, _FakeResult(cost=0.001, turns=1)
+        return {"findings": [_make_finding(title="Real bug")]}, _FakeResult(cost=0.01, turns=2)
+
+    orch = PythonFanoutOrchestrator(run_one_query=fake_run_one_query)
+    pr_context = PullRequestContext(
+        repo_root=Path("/tmp/fake"),
+        changed_files=[],
+        unified_diff=None,
+        conventions_text=None,
+    )
+
+    with caplog.at_level(logging.INFO, logger="coco_pr_review.orchestration.python_fanout"):
+        result = await orch.run(
+            pr_context=pr_context,
+            reviewers=[reviewer],
+            verifier=verifier,
+            budget=BudgetGate(max_usd=10.0),
+            progress=NoOpProgressSink(),
+        )
+
+    assert len(result.findings) == 0
+    # Dropped in the `unparseable` bucket, NOT `low_confidence`.
+    assert "unparseable=1" in caplog.text
+    assert "low_confidence=0" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -1103,7 +1287,7 @@ async def test_config_caps_max_findings_per_reviewer() -> None:
 
     # Reviewer returns 10 findings; cap is 3.
     flood = [
-        _make_finding(title=f"F{i}", start_line=i, end_line=i, evidence=f"e{i}")
+        _make_finding(title=f"F{i}", start_line=i + 1, end_line=i + 1, evidence=f"e{i}")
         for i in range(10)
     ]
 

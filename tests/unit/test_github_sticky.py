@@ -296,3 +296,36 @@ def test_render_sticky_diff_too_large_mentions_split_guidance() -> None:
 
     assert "2000 changed lines" in body
     assert "Consider splitting this change into smaller PRs" in body
+
+
+def test_render_sticky_failed_includes_marker_and_disclaims_clean_review() -> None:
+    """Failed sticky carries the marker, the reason, and a 'not clean' disclaimer."""
+    from coco_pr_review.github.sticky import SUMMARY_MARKER, render_sticky_failed
+
+    body = render_sticky_failed(reason="all reviewer replicas failed")
+
+    assert SUMMARY_MARKER in body
+    assert "Review failed" in body
+    assert "all reviewer replicas failed" in body
+    # Must NOT read as a clean bill of health.
+    assert "not" in body.lower()
+    assert "re-run" in body.lower()
+
+
+def test_render_sticky_final_adds_degraded_note_when_replicas_failed() -> None:
+    """A non-zero reviewer_failures count surfaces a partial-degradation warning."""
+    from coco_pr_review.github.sticky import render_sticky_final
+
+    body = render_sticky_final(findings=[], posted=0, skipped=0, reviewer_failures=2)
+
+    assert "2 reviewer replicas failed" in body
+    assert "results may be incomplete" in body
+
+
+def test_render_sticky_final_omits_degraded_note_when_no_failures() -> None:
+    """Default (zero failures) renders no degradation warning."""
+    from coco_pr_review.github.sticky import render_sticky_final
+
+    body = render_sticky_final(findings=[], posted=0, skipped=0)
+
+    assert "results may be incomplete" not in body

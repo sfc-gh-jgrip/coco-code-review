@@ -267,3 +267,37 @@ async def test_run_one_query_recovers_fenced_json_when_structured_output_missing
     output, _ = await run_one_query(message_stream=stream)
 
     assert output == {"findings": [finding]}
+
+
+@pytest.mark.asyncio
+async def test_run_one_query_raises_when_structured_output_missing_and_result_unparseable() -> None:
+    """structured_output=None + non-JSON result → fail closed (StructuredOutputError)."""
+    from coco_pr_review.orchestration.sdk_adapter import (
+        StructuredOutputError,
+        run_one_query,
+    )
+
+    bad_result = FakeResultMessage(
+        is_error=False,
+        structured_output=None,
+        result="I could not find any issues, sorry!",
+    )
+    stream = _fake_stream([FakeAssistantMessage(), bad_result])
+
+    with pytest.raises(StructuredOutputError):
+        await run_one_query(message_stream=stream)
+
+
+@pytest.mark.asyncio
+async def test_run_one_query_raises_when_structured_output_missing_and_result_none() -> None:
+    """structured_output=None + result=None → fail closed (StructuredOutputError)."""
+    from coco_pr_review.orchestration.sdk_adapter import (
+        StructuredOutputError,
+        run_one_query,
+    )
+
+    bad_result = FakeResultMessage(is_error=False, structured_output=None, result=None)
+    stream = _fake_stream([FakeAssistantMessage(), bad_result])
+
+    with pytest.raises(StructuredOutputError):
+        await run_one_query(message_stream=stream)

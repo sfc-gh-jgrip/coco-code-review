@@ -89,12 +89,17 @@ def render_sticky_final(
     findings: list[Any],
     posted: int,
     skipped: int,
+    reviewer_failures: int = 0,
 ) -> str:
     """Render the final sticky comment body after publishing.
 
     Includes the summary marker, a severity breakdown table, and a per-finding
     list (title, location, category) so reviewers can see what was flagged
     without scrolling through inline comments.
+
+    When ``reviewer_failures`` is non-zero the run completed but some reviewer
+    replicas failed (e.g. unparseable output), so results may be incomplete; a
+    warning note is added to make that visible rather than implying a clean run.
     """
     blocker_count = sum(1 for f in findings if f.severity == "blocker")
     warning_count = sum(1 for f in findings if f.severity == "warning")
@@ -116,6 +121,16 @@ def render_sticky_final(
         "",
         f"{total} total findings · {posted} posted · {skipped} skipped (duplicates)",
     ]
+
+    if reviewer_failures:
+        replica_word = "replica" if reviewer_failures == 1 else "replicas"
+        lines.extend(
+            [
+                "",
+                f"⚠️ {reviewer_failures} reviewer {replica_word} failed; "
+                "results may be incomplete.",
+            ]
+        )
 
     if findings:
         # Most-severe first; severity ordering is owned by the severity module.
@@ -152,3 +167,25 @@ def render_sticky_diff_too_large(*, max_diff_lines: int) -> str:
             "Consider splitting this change into smaller PRs so the review can focus on the relevant code paths."
         ),
     )
+
+
+def render_sticky_failed(*, reason: str, details: str | None = None) -> str:
+    """Render the sticky body for a run that aborted before publishing.
+
+    Distinct from ``render_sticky_skipped`` (a deliberate, benign no-review):
+    this announces that the review attempted to run but failed (e.g. every
+    reviewer replica errored, or the budget tripped), so the absence of inline
+    comments must NOT be read as "no issues found". The user should re-run.
+    """
+    lines = [
+        "## 🤖 Coco PR Review",
+        SUMMARY_MARKER,
+        "",
+        f"❌ Review failed: {reason}",
+        "",
+        "This is an infrastructure failure, **not** a clean bill of health — "
+        "no findings were published. Please re-run the review.",
+    ]
+    if details:
+        lines.extend(["", details])
+    return "\n".join(lines)

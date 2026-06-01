@@ -64,6 +64,10 @@ class RunResult:
     total_turns: int
     aborted: bool
     abort_reason: str | None
+    # Count of reviewer replicas that failed (e.g. unparseable/invalid structured
+    # output). Non-zero on a non-aborted run signals partial degradation: results
+    # may be incomplete. Defaulted so existing callers/tests are unaffected.
+    reviewer_failures: int = 0
 
 
 # ---------------------------------------------------------------------------
