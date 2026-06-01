@@ -13,7 +13,8 @@ from __future__ import annotations
 
 from typing import Any
 
-SEVERITIES = ("blocker", "warning", "nit")
+from coco_pr_review.severity import SEVERITIES
+
 CATEGORIES = ("correctness", "security", "perf", "style", "test")
 
 

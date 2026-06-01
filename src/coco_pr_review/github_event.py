@@ -132,6 +132,20 @@ def is_comment_review_trigger(event: IssueCommentEvent) -> bool:
     )
 
 
+def resolve_head_sha(
+    event: PullRequestEvent | IssueCommentEvent,
+    github: Github,
+) -> str:
+    """Resolve the PR head SHA for an event.
+
+    ``pull_request`` events carry the head SHA in their payload; comment
+    triggers must look it up from the live PR.
+    """
+    if isinstance(event, PullRequestEvent):
+        return event.head_sha
+    return github.get_repo(event.repo_full_name).get_pull(event.pr_number).head.sha
+
+
 def build_github_client(
     *,
     event: PullRequestEvent | IssueCommentEvent,
@@ -145,17 +159,11 @@ def build_github_client(
         token = github_token or os.environ["GITHUB_TOKEN"]
         resolved_github = Github(auth=Auth.Token(token))
 
-    repo = resolved_github.get_repo(event.repo_full_name)
-    if isinstance(event, PullRequestEvent):
-        head_sha = event.head_sha
-    else:
-        head_sha = repo.get_pull(event.pr_number).head.sha
-
     return GitHubClient(
         github=resolved_github,
         repo_full_name=event.repo_full_name,
         pr_number=event.pr_number,
-        head_sha=head_sha,
+        head_sha=resolve_head_sha(event, resolved_github),
         bot_login=bot_login,
     )
 
@@ -176,12 +184,19 @@ async def run_github_event(
     event_name: str | None = None,
     payload: dict[str, Any] | None = None,
     event_path: str | os.PathLike[str] | None = None,
+    event: PullRequestEvent | IssueCommentEvent | None = None,
     github: Github | None = None,
     github_token: str | None = None,
     bot_login: str = DEFAULT_BOT_LOGIN,
 ) -> ReviewRunResult:
-    """Dispatch a supported GitHub event into the review runner."""
-    event = parse_github_event(event_name=event_name, payload=payload, event_path=event_path)
+    """Dispatch a supported GitHub event into the review runner.
+
+    Callers may pass an already-parsed ``event`` to avoid re-parsing the
+    payload; when omitted it is parsed from ``event_name``/``payload``/
+    ``event_path``.
+    """
+    if event is None:
+        event = parse_github_event(event_name=event_name, payload=payload, event_path=event_path)
     if isinstance(event, IssueCommentEvent) and not is_comment_review_trigger(event):
         raise UnsupportedGitHubEventError("issue_comment event is not an allowed @coco-review trigger")
 
@@ -292,11 +307,12 @@ def main() -> int:
         payload = load_event_payload(event_path)
         event = parse_github_event(event_name=event_name, payload=payload, event_path=event_path)
         bot_login = os.environ.get("COCO_BOT_LOGIN", DEFAULT_BOT_LOGIN)
+        head_sha = resolve_head_sha(event, github)
         publisher = Publisher(
             github=github,
             repo_full_name=event.repo_full_name,
             pr_number=event.pr_number,
-            head_sha=event.head_sha if isinstance(event, PullRequestEvent) else github.get_repo(event.repo_full_name).get_pull(event.pr_number).head.sha,
+            head_sha=head_sha,
             sanitize_fn=redact,
             bot_login=bot_login,
         )
@@ -312,8 +328,7 @@ def main() -> int:
                 progress=progress,
                 sanitize_fn=redact,
                 conventions_text=conventions_text,
-                payload=payload,
-                event_name=event_name,
+                event=event,
                 github=github,
                 bot_login=bot_login,
             )

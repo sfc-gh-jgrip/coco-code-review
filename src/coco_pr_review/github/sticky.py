@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from coco_pr_review.severity import emoji_for, severity_rank
+
 SUMMARY_MARKER = "<!-- coco-pr-review:summary -->"
 
 
@@ -94,7 +96,6 @@ def render_sticky_final(
     list (title, location, category) so reviewers can see what was flagged
     without scrolling through inline comments.
     """
-    severity_emoji = {"blocker": "🔴", "warning": "🟡", "nit": "⚪"}
     blocker_count = sum(1 for f in findings if f.severity == "blocker")
     warning_count = sum(1 for f in findings if f.severity == "warning")
     nit_count = sum(1 for f in findings if f.severity == "nit")
@@ -117,14 +118,14 @@ def render_sticky_final(
     ]
 
     if findings:
-        # Sort blocker → warning → nit so the most important findings lead.
-        severity_rank = {"blocker": 0, "warning": 1, "nit": 2}
-        ordered = sorted(findings, key=lambda f: severity_rank.get(f.severity, 3))
+        # Most-severe first; severity ordering is owned by the severity module.
+        ordered = sorted(findings, key=lambda f: severity_rank(f.severity))
         lines.extend(["", "### Findings"])
         for finding in ordered:
-            emoji = severity_emoji.get(finding.severity, "⚪")
             location = f"`{finding.file}:{finding.start_line}`"
-            lines.append(f"- {emoji} **{finding.title}** — {location} ({finding.category})")
+            lines.append(
+                f"- {emoji_for(finding.severity)} **{finding.title}** — {location} ({finding.category})"
+            )
 
     return "\n".join(lines)
 

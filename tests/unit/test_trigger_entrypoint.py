@@ -17,6 +17,35 @@ def _make_review_run_result(*, status: str = "reviewed", aborted: bool = False):
     return ReviewRunResult(status=status, run_result=run_result)
 
 
+def test_resolve_head_sha_uses_payload_for_pull_request_event() -> None:
+    """PR events carry the head SHA; no API lookup is performed."""
+    from coco_pr_review.github_event import PullRequestEvent, resolve_head_sha
+
+    github = MagicMock()
+    event = PullRequestEvent(repo_full_name="owner/repo", pr_number=1, head_sha="a" * 40)
+
+    assert resolve_head_sha(event, github) == "a" * 40
+    github.get_repo.assert_not_called()
+
+
+def test_resolve_head_sha_looks_up_pr_for_comment_event() -> None:
+    """Comment triggers look up the live PR head SHA."""
+    from coco_pr_review.github_event import IssueCommentEvent, resolve_head_sha
+
+    github = MagicMock()
+    github.get_repo.return_value.get_pull.return_value.head.sha = "c" * 40
+    event = IssueCommentEvent(
+        repo_full_name="owner/repo",
+        pr_number=9,
+        comment_body="@coco-review",
+        author_association="MEMBER",
+        is_pull_request=True,
+    )
+
+    assert resolve_head_sha(event, github) == "c" * 40
+    github.get_repo.return_value.get_pull.assert_called_once_with(9)
+
+
 def test_parse_pull_request_event() -> None:
     from coco_pr_review.github_event import PullRequestEvent, parse_github_event
 

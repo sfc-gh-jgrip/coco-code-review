@@ -13,23 +13,12 @@ from typing import Any, Callable
 
 from github import GithubException
 
-SEVERITY_EMOJI: dict[str, str] = {
-    "blocker": "🔴",
-    "warning": "🟡",
-    "nit": "⚪",
-}
+from coco_pr_review.severity import SEVERITIES, emoji_for, severity_rank
 
 SEVERITY_TO_LEVEL: dict[str, str] = {
     "blocker": "failure",
     "warning": "warning",
     "nit": "notice",
-}
-
-# Sort weights: lower = sorted first (blockers at top)
-_SEVERITY_WEIGHT: dict[str, int] = {
-    "blocker": 0,
-    "warning": 1,
-    "nit": 2,
 }
 
 _MAX_ANNOTATIONS_PER_CALL = 50
@@ -38,7 +27,7 @@ _MAX_ANNOTATIONS_PER_CALL = 50
 def _sort_key(finding: Any) -> tuple[int, str, int]:
     """Deterministic sort key: severity tier desc, file path asc, start_line asc."""
     return (
-        _SEVERITY_WEIGHT.get(finding.severity, 99),
+        severity_rank(finding.severity),
         finding.file,
         finding.start_line,
     )
@@ -58,11 +47,11 @@ def render_checks_output_text(findings: list[Any]) -> str:
         "|----------|-----------|-------|",
     ]
     for f in sorted_findings:
-        emoji = SEVERITY_EMOJI.get(f.severity, "⚪")
+        emoji = emoji_for(f.severity)
         lines.append(f"| {emoji} | {f.file}:{f.start_line} | {f.title} |")
 
     # Severity counts
-    counts = {"blocker": 0, "warning": 0, "nit": 0}
+    counts = {severity: 0 for severity in SEVERITIES}
     for f in findings:
         if f.severity in counts:
             counts[f.severity] += 1
