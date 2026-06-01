@@ -312,6 +312,29 @@ def test_render_sticky_failed_includes_marker_and_disclaims_clean_review() -> No
     assert "re-run" in body.lower()
 
 
+def test_render_sticky_failed_appends_details_when_provided() -> None:
+    """Optional details text is appended below the failure disclaimer."""
+    from coco_pr_review.github.sticky import render_sticky_failed
+
+    body = render_sticky_failed(
+        reason="budget exhausted",
+        details="cost $5.00 >= limit $5.00",
+    )
+
+    assert "budget exhausted" in body
+    assert "cost $5.00 >= limit $5.00" in body
+
+
+def test_render_sticky_failed_omits_details_section_when_absent() -> None:
+    """Without details, only the reason and disclaimer are rendered."""
+    from coco_pr_review.github.sticky import render_sticky_failed
+
+    body = render_sticky_failed(reason="all reviewer replicas failed")
+
+    # The disclaimer is the final line; nothing trails it.
+    assert body.rstrip().endswith("Please re-run the review.")
+
+
 def test_render_sticky_final_adds_degraded_note_when_replicas_failed() -> None:
     """A non-zero reviewer_failures count surfaces a partial-degradation warning."""
     from coco_pr_review.github.sticky import render_sticky_final
