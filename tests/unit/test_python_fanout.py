@@ -756,6 +756,61 @@ async def test_pre_existing_non_correctness_finding_is_dropped() -> None:
 
 
 @pytest.mark.asyncio
+async def test_files_read_aggregated_into_stats() -> None:
+    """Distinct Read paths reported by reviewer replicas roll up into stats.files_read."""
+    from coco_pr_review.orchestration.base import (
+        BudgetGate,
+        NoOpProgressSink,
+        PullRequestContext,
+    )
+    from coco_pr_review.orchestration.python_fanout import PythonFanoutOrchestrator
+    from coco_pr_review.reviewer_spec import ReviewerSpec
+
+    reviewer = ReviewerSpec(
+        name="bugs-and-security",
+        description="Finds bugs",
+        model="claude-sonnet-4-6",
+        tools=["Read", "Glob", "Grep"],
+        system_prompt="You find bugs.",
+    )
+    verifier = ReviewerSpec(
+        name="verifier",
+        description="Verifies",
+        model="claude-opus-4-6",
+        tools=["Read", "Glob", "Grep"],
+        system_prompt="You verify.",
+    )
+
+    async def fake_run_one_query(*, system_prompt: str, user_prompt: str, **kwargs: Any) -> tuple[Any, Any]:
+        if "verify" in system_prompt.lower():
+            return _make_verification(confidence=90), _FakeResult(
+                files_read=["src/app.py"]  # verifier reads too; must NOT be counted
+            )
+        return {"findings": [_make_finding()]}, _FakeResult(
+            files_read=["src/app.py", "src/helpers.py"]
+        )
+
+    orch = PythonFanoutOrchestrator(run_one_query=fake_run_one_query)
+    pr_context = PullRequestContext(
+        repo_root=Path("/tmp/fake"),
+        changed_files=[],
+        unified_diff=None,
+        conventions_text=None,
+    )
+
+    result = await orch.run(
+        pr_context=pr_context,
+        reviewers=[reviewer],
+        verifier=verifier,
+        budget=BudgetGate(max_usd=10.0),
+        progress=NoOpProgressSink(),
+    )
+
+    # Two distinct files read by the reviewer replica (verifier reads excluded).
+    assert result.stats.files_read == 2
+
+
+@pytest.mark.asyncio
 async def test_negative_dedupe_different_evidence_both_survive() -> None:
     """Two findings with same (file, start, end, title) but DIFFERENT evidence → both survive.
 
@@ -1208,9 +1263,12 @@ async def test_verifier_invalid_output_dropped_as_unparseable_not_low_confidence
 class _FakeResult:
     """Mimics the cost/turns fields the orchestrator reads from ResultMessage."""
 
-    def __init__(self, *, cost: float = 0.01, turns: int = 1) -> None:
+    def __init__(
+        self, *, cost: float = 0.01, turns: int = 1, files_read: list[str] | None = None
+    ) -> None:
         self.total_cost_usd = cost
         self.num_turns = turns
+        self.files_read = files_read or []
 
 
 # ---------------------------------------------------------------------------

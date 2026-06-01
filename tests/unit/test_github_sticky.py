@@ -430,6 +430,7 @@ def _make_stats(**overrides):
         dropped_evidence_mismatch=0,
         dropped_not_in_pr=1,
         confidence_threshold=80,
+        files_read=7,
     )
     defaults.update(overrides)
     return PipelineStats(**defaults)
@@ -448,6 +449,8 @@ def test_render_sticky_final_includes_analysis_funnel_when_stats_present() -> No
     assert "4 dispatched" in body
     assert "3 raw" in body
     assert "2 after dedupe" in body
+    # Context breadth (files read by reviewers) is surfaced.
+    assert "7 file(s) read by reviewers" in body
     # Filtered-out breakdown distinguishes a clean-but-filtered run from a broken one.
     assert "low confidence 1" in body
     assert "out-of-diff dropped 1" in body

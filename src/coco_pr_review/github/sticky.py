@@ -105,6 +105,7 @@ def _render_analysis_summary(stats: Any) -> list[str]:
         + stats.dropped_not_in_pr
     )
     pre_existing = getattr(stats, "pre_existing", 0)
+    files_read = getattr(stats, "files_read", 0)
     return [
         "",
         "<details>",
@@ -113,6 +114,7 @@ def _render_analysis_summary(stats: Any) -> list[str]:
         f"- **Reviewers** ({len(stats.reviewer_names)}): {reviewers}",
         f"- **Replicas**: {stats.replicas_dispatched} dispatched · "
         f"{stats.replicas_succeeded} succeeded · {stats.replicas_failed} failed",
+        f"- **Context**: {files_read} file(s) read by reviewers",
         f"- **Candidates**: {stats.raw_candidates} raw → "
         f"{stats.deduped_candidates} after dedupe",
         f"- **Verified**: {stats.verified} (survived all filters) · "

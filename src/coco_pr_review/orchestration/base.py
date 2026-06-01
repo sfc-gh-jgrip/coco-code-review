@@ -86,6 +86,10 @@ class PipelineStats:
     # ``dropped_not_in_pr`` now only counts out-of-diff findings we chose to
     # discard (e.g. non-correctness/security categories).
     pre_existing: int = 0
+    # Distinct files the reviewers opened via Read while building context. Zero
+    # means the reviewers worked from the diff alone (or the SDK did not report
+    # tool calls). Surfaced in the summary as context-breadth observability.
+    files_read: int = 0
 
 
 @dataclass

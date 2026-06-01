@@ -285,6 +285,9 @@ class PythonFanoutOrchestrator(Orchestrator):
 
         total_cost: float = 0.0
         total_turns: int = 0
+        # Distinct file paths the reviewer replicas opened via Read, so the
+        # summary can report how much context was actually read (vs. diff-only).
+        files_read: set[str] = set()
 
         # ---------------------------------------------------------------
         # Phase A: Reviewer fan-out
@@ -316,6 +319,12 @@ class PythonFanoutOrchestrator(Orchestrator):
             nonlocal total_cost, total_turns
             total_cost += cost
             total_turns += turns
+            # Record context breadth (distinct files this replica Read). Updating
+            # a shared set is safe here: asyncio is single-threaded and there is
+            # no await between the read and the update.
+            replica_files = getattr(result, "files_read", None)
+            if replica_files:
+                files_read.update(replica_files)
 
             # Defensive cap BEFORE validation: the config may tighten the per
             # reviewer finding count below the schema's maxItems, and the
@@ -571,5 +580,6 @@ class PythonFanoutOrchestrator(Orchestrator):
                 dropped_not_in_pr=dropped_not_in_pr,
                 confidence_threshold=confidence_threshold,
                 pre_existing=pre_existing_count,
+                files_read=len(files_read),
             ),
         )
