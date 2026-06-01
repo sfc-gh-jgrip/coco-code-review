@@ -2,18 +2,36 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import sys
+import asyncio
+from contextlib import aclosing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from cortex_code_agent_sdk import CortexCodeAgentOptions, query
 from github import Auth, Github
 
+from coco_pr_review.config import find_config, load_config
 from coco_pr_review.github.client import GitHubClient
+from coco_pr_review.github.publisher import Publisher
+from coco_pr_review.orchestration.base import BudgetGate, NoOpProgressSink
+from coco_pr_review.orchestration.sdk_adapter import run_one_query
+from coco_pr_review.orchestration.python_fanout import PythonFanoutOrchestrator
+from coco_pr_review.prompts import discover_conventions
 from coco_pr_review.review_runner import ReviewRunResult, run_review
+from coco_pr_review.reviewer_spec import parse_agent_md
+from coco_pr_review.sanitize import redact
 
 TRIGGER_MENTION = "@coco-review"
 ALLOWED_AUTHOR_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
+
+# Login used to find/filter bot-authored comments. Defaults to the
+# GITHUB_TOKEN identity in Actions; a GitHub App run overrides it via the
+# COCO_BOT_LOGIN env var (e.g. "coco-pr-review[bot]").
+DEFAULT_BOT_LOGIN = "github-actions[bot]"
 
 
 class UnsupportedGitHubEventError(ValueError):
@@ -114,11 +132,26 @@ def is_comment_review_trigger(event: IssueCommentEvent) -> bool:
     )
 
 
+def resolve_head_sha(
+    event: PullRequestEvent | IssueCommentEvent,
+    github: Github,
+) -> str:
+    """Resolve the PR head SHA for an event.
+
+    ``pull_request`` events carry the head SHA in their payload; comment
+    triggers must look it up from the live PR.
+    """
+    if isinstance(event, PullRequestEvent):
+        return event.head_sha
+    return github.get_repo(event.repo_full_name).get_pull(event.pr_number).head.sha
+
+
 def build_github_client(
     *,
     event: PullRequestEvent | IssueCommentEvent,
     github: Github | None = None,
     github_token: str | None = None,
+    bot_login: str = DEFAULT_BOT_LOGIN,
 ) -> GitHubClient:
     """Construct a GitHub client for the event using the latest PR head SHA."""
     resolved_github = github
@@ -126,17 +159,12 @@ def build_github_client(
         token = github_token or os.environ["GITHUB_TOKEN"]
         resolved_github = Github(auth=Auth.Token(token))
 
-    repo = resolved_github.get_repo(event.repo_full_name)
-    if isinstance(event, PullRequestEvent):
-        head_sha = event.head_sha
-    else:
-        head_sha = repo.get_pull(event.pr_number).head.sha
-
     return GitHubClient(
         github=resolved_github,
         repo_full_name=event.repo_full_name,
         pr_number=event.pr_number,
-        head_sha=head_sha,
+        head_sha=resolve_head_sha(event, resolved_github),
+        bot_login=bot_login,
     )
 
 
@@ -156,15 +184,25 @@ async def run_github_event(
     event_name: str | None = None,
     payload: dict[str, Any] | None = None,
     event_path: str | os.PathLike[str] | None = None,
+    event: PullRequestEvent | IssueCommentEvent | None = None,
     github: Github | None = None,
     github_token: str | None = None,
+    bot_login: str = DEFAULT_BOT_LOGIN,
 ) -> ReviewRunResult:
-    """Dispatch a supported GitHub event into the review runner."""
-    event = parse_github_event(event_name=event_name, payload=payload, event_path=event_path)
+    """Dispatch a supported GitHub event into the review runner.
+
+    Callers may pass an already-parsed ``event`` to avoid re-parsing the
+    payload; when omitted it is parsed from ``event_name``/``payload``/
+    ``event_path``.
+    """
+    if event is None:
+        event = parse_github_event(event_name=event_name, payload=payload, event_path=event_path)
     if isinstance(event, IssueCommentEvent) and not is_comment_review_trigger(event):
         raise UnsupportedGitHubEventError("issue_comment event is not an allowed @coco-review trigger")
 
-    github_client = build_github_client(event=event, github=github, github_token=github_token)
+    github_client = build_github_client(
+        event=event, github=github, github_token=github_token, bot_login=bot_login
+    )
     return await run_review(
         repo_root=repo_root,
         github_client=github_client,
@@ -182,8 +220,142 @@ async def run_github_event(
     )
 
 
+def resolve_event_context() -> tuple[str | None, str | None]:
+    """Resolve the event name and path, preferring explicit smoke overrides.
+
+    GitHub Actions does not reliably allow a step-level ``env:`` block to
+    override the reserved ``GITHUB_EVENT_NAME``/``GITHUB_EVENT_PATH`` values, so
+    the manual smoke workflow sets ``COCO_PR_REVIEW_EVENT_NAME`` and
+    ``COCO_PR_REVIEW_EVENT_PATH`` instead. Those take precedence when present.
+    """
+    event_name = os.environ.get("COCO_PR_REVIEW_EVENT_NAME") or os.environ.get("GITHUB_EVENT_NAME")
+    event_path = os.environ.get("COCO_PR_REVIEW_EVENT_PATH") or os.environ.get("GITHUB_EVENT_PATH")
+    return event_name, event_path
+
+
 def main() -> int:
-    """CLI entrypoint placeholder for GitHub Actions event dispatch."""
-    raise UnsupportedGitHubEventError(
-        "CLI wiring is not implemented yet; call run_github_event from the workflow harness"
+    """CLI entrypoint for GitHub Actions event dispatch."""
+    logging.basicConfig(
+        level=os.environ.get("COCO_PR_REVIEW_LOG_LEVEL", "INFO").upper(),
+        stream=sys.stdout,
+        format="%(levelname)s %(name)s: %(message)s",
     )
+    repo_root = Path(os.environ.get("GITHUB_WORKSPACE", Path.cwd())).resolve()
+    config_path = find_config(repo_root)
+    config = load_config(config_path)
+
+    if not os.environ.get("SNOWFLAKE_ACCOUNT") or not os.environ.get("SNOWFLAKE_HOST"):
+        print("SNOWFLAKE_ACCOUNT and SNOWFLAKE_HOST must be set for the review runtime")
+        return 1
+
+    reviewers_dir = repo_root / "src" / "coco_pr_review" / "agents"
+    reviewers = [
+        parse_agent_md(reviewers_dir / "bugs-and-security.md"),
+        parse_agent_md(reviewers_dir / "tests-coverage.md"),
+        parse_agent_md(reviewers_dir / "style-and-conventions.md"),
+        parse_agent_md(reviewers_dir / "performance-and-cost.md"),
+    ]
+    verifier = parse_agent_md(reviewers_dir / "verifier.md")
+
+    async def run_one_query_with_sdk(
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        output_schema: dict[str, Any] | None = None,
+        **_: Any,
+    ) -> tuple[Any, Any]:
+        # Forward the cortex CLI subprocess stderr to our stderr so that
+        # SDK-level execution errors are visible in CI logs.
+        def _on_stderr(line: str) -> None:
+            print(f"[cortex-sdk] {line}", file=sys.stderr, flush=True)
+
+        # Request structured output via JSON schema when the caller supplies one.
+        # This makes the CLI emit `--json-schema`, populating ResultMessage
+        # `structured_output` directly (no fence/prose recovery needed).
+        output_format = (
+            {"type": "json_schema", "schema": output_schema}
+            if output_schema is not None
+            else None
+        )
+
+        # Close the SDK async generator in the same task that iterates it.
+        # Otherwise GC-time cleanup of query()'s internal anyio task group raises
+        # "Attempted to exit cancel scope in a different task than it was entered in".
+        async with aclosing(
+            query(
+                prompt=user_prompt,
+                options=CortexCodeAgentOptions(
+                    cwd=str(repo_root),
+                    append_system_prompt=system_prompt,
+                    stderr=_on_stderr,
+                    output_format=output_format,
+                ),
+            )
+        ) as message_stream:
+            return await run_one_query(message_stream=message_stream)
+
+    orchestrator = PythonFanoutOrchestrator(run_one_query=run_one_query_with_sdk, config=config)
+    github = Github(auth=Auth.Token(os.environ["GITHUB_TOKEN"]))
+    budget = BudgetGate(max_usd=config.limits.max_usd_per_pr)
+    progress = NoOpProgressSink()
+
+    conventions_path = discover_conventions(repo_root)
+    conventions_text = conventions_path.read_text() if conventions_path else None
+
+    try:
+        event_name, event_path = resolve_event_context()
+        payload = load_event_payload(event_path)
+        event = parse_github_event(event_name=event_name, payload=payload, event_path=event_path)
+        bot_login = os.environ.get("COCO_BOT_LOGIN", DEFAULT_BOT_LOGIN)
+        head_sha = resolve_head_sha(event, github)
+        publisher = Publisher(
+            github=github,
+            repo_full_name=event.repo_full_name,
+            pr_number=event.pr_number,
+            head_sha=head_sha,
+            sanitize_fn=redact,
+            bot_login=bot_login,
+        )
+        result = asyncio.run(
+            run_github_event(
+                repo_root=repo_root,
+                config=config,
+                reviewers=reviewers,
+                verifier=verifier,
+                orchestrator=orchestrator,
+                publisher=publisher,
+                budget=budget,
+                progress=progress,
+                sanitize_fn=redact,
+                conventions_text=conventions_text,
+                event=event,
+                github=github,
+                bot_login=bot_login,
+            )
+        )
+    except UnsupportedGitHubEventError as exc:
+        print(str(exc))
+        return 1
+
+    if not isinstance(result, ReviewRunResult):
+        return 1
+
+    run_result = result.run_result
+    if run_result is not None:
+        logging.getLogger("coco_pr_review").info(
+            "review finished: status=%s candidates=%s deduped=%s verified=%s "
+            "cost_usd=%s aborted=%s reason=%s",
+            result.status,
+            getattr(run_result, "candidate_count", None),
+            getattr(run_result, "deduped_count", None),
+            len(getattr(run_result, "findings", []) or []),
+            getattr(run_result, "total_cost_usd", None),
+            getattr(run_result, "aborted", None),
+            getattr(run_result, "abort_reason", None),
+        )
+    else:
+        logging.getLogger("coco_pr_review").info("review finished: status=%s (no run_result)", result.status)
+
+    if run_result is not None and getattr(run_result, "aborted", False):
+        return 1
+    return 0

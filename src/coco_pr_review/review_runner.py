@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from coco_pr_review.config import CocoPRReviewConfig
+from coco_pr_review.github.diff import build_unified_diff
 from coco_pr_review.github.sticky import (
     render_sticky_diff_too_large,
     render_sticky_skipped,
@@ -50,6 +51,7 @@ async def run_review(
             github_client.pull_request,
             render_sticky_skipped(reason="pull request author is a bot account"),
             sanitize_fn,
+            bot_login=github_client.bot_login,
         )
         return ReviewRunResult(status="skipped_bot_pr")
 
@@ -58,6 +60,7 @@ async def run_review(
             github_client.pull_request,
             render_sticky_skipped(reason="pull request is still marked as a draft"),
             sanitize_fn,
+            bot_login=github_client.bot_login,
         )
         return ReviewRunResult(status="skipped_draft_pr")
 
@@ -66,6 +69,7 @@ async def run_review(
             github_client.pull_request,
             render_sticky_skipped(reason="pull request has the `coco-review:skip` label"),
             sanitize_fn,
+            bot_login=github_client.bot_login,
         )
         return ReviewRunResult(status="skipped_skip_label")
 
@@ -75,6 +79,7 @@ async def run_review(
             github_client.pull_request,
             render_sticky_skipped(reason="no reviewable files remain after applying ignore rules"),
             sanitize_fn,
+            bot_login=github_client.bot_login,
         )
         return ReviewRunResult(status="skipped_no_reviewable_files")
 
@@ -83,13 +88,14 @@ async def run_review(
             github_client.pull_request,
             render_sticky_diff_too_large(max_diff_lines=config.max_diff_lines),
             sanitize_fn,
+            bot_login=github_client.bot_login,
         )
         return ReviewRunResult(status="skipped_diff_too_large")
 
     pr_context = PullRequestContext(
         repo_root=repo_root,
         changed_files=filtered_files,
-        unified_diff=unified_diff,
+        unified_diff=unified_diff if unified_diff is not None else build_unified_diff(filtered_files),
         conventions_text=conventions_text,
     )
     run_result = await orchestrator.run(
@@ -99,6 +105,9 @@ async def run_review(
         budget=budget,
         progress=progress,
     )
+    if getattr(run_result, "aborted", False):
+        return ReviewRunResult(status="aborted", run_result=run_result)
+
     publish_report = publisher.publish(run_result)
     return ReviewRunResult(
         status="reviewed",

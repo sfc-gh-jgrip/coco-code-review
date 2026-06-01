@@ -40,6 +40,7 @@ class ChangedFile:
 
     path: str
     line_ranges: list[tuple[int, int]]  # 1-indexed inclusive ranges
+    patch: str | None = None  # raw unified-diff body for this file, if available
 
 
 @dataclass

@@ -11,9 +11,53 @@ Error classification uses the same subtypes as `coco_pr_review.retry`:
 from __future__ import annotations
 
 import json
+import logging
+import re
 from typing import Any, AsyncIterator
 
 from coco_pr_review.retry import classify_sdk_error
+
+logger = logging.getLogger(__name__)
+
+# Matches a fenced code block, optionally tagged ```json. The body is captured
+# lazily so the FIRST complete block wins.
+_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
+
+
+def extract_json(raw: str) -> Any:
+    """Best-effort parse of a JSON value from possibly fenced or prefixed text.
+
+    Cortex models frequently wrap structured output in a Markdown ``` ```json ```
+    fence, sometimes after a prose preamble, so a bare ``json.loads`` fails. This
+    tries, in order:
+
+      1. Direct ``json.loads`` of the stripped text.
+      2. The first ``` ```json ``` (or bare ```` ``` ````) fenced block that parses.
+      3. The outermost ``{ ... }`` substring.
+
+    Raises ``json.JSONDecodeError`` when no candidate parses.
+    """
+    text = raw.strip()
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    for match in _FENCE_RE.finditer(text):
+        candidate = match.group(1).strip()
+        if not candidate:
+            continue
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end > start:
+        return json.loads(text[start : end + 1])
+
+    raise json.JSONDecodeError("no JSON object found in result text", text, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -34,13 +78,19 @@ class HardSdkError(Exception):
 # ---------------------------------------------------------------------------
 
 
-def _raise_classified(subtype: str) -> None:
-    """Raise the appropriate exception type for an SDK error subtype."""
+def _raise_classified(subtype: str, detail: str | None = None) -> None:
+    """Raise the appropriate exception type for an SDK error subtype.
+
+    ``detail`` carries the SDK's human-readable error text (e.g. the
+    ResultMessage ``result`` field) so failures surface a real cause instead of
+    only the opaque subtype.
+    """
+    message = f"{subtype}: {detail}" if detail else subtype
     classification = classify_sdk_error(subtype)
     if classification == "hard":
-        raise HardSdkError(subtype)
+        raise HardSdkError(message)
     # Default to transient — safer to retry than to abort.
-    raise TransientSdkError(subtype)
+    raise TransientSdkError(message)
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +144,17 @@ async def run_one_query(
         if hasattr(msg, "is_error"):
             if msg.is_error:
                 subtype = getattr(msg, "subtype", "unknown") or "unknown"
-                _raise_classified(subtype)
+                detail = getattr(msg, "result", None)
+                if not detail:
+                    # The result text is often empty for execution errors; fall
+                    # back to the richer fields so the real cause is visible.
+                    detail = (
+                        f"stop_reason={getattr(msg, 'stop_reason', None)} "
+                        f"permission_denials={getattr(msg, 'permission_denials', None)} "
+                        f"num_turns={getattr(msg, 'num_turns', None)} "
+                        f"duration_ms={getattr(msg, 'duration_ms', None)}"
+                    )
+                _raise_classified(subtype, detail)
             # Success terminal message.
             result_message = msg
 
@@ -109,11 +169,28 @@ async def run_one_query(
         raw = getattr(result_message, "result", None)
         if raw is not None:
             try:
-                output = json.loads(raw)
+                output = extract_json(raw)
+                logger.debug(
+                    "structured_output missing; recovered JSON from plaintext result "
+                    "(fence/prose tolerant, raw_len=%d).",
+                    len(raw) if isinstance(raw, str) else -1,
+                )
             except (json.JSONDecodeError, TypeError):
                 # Soft-fail: return empty dict → zero findings downstream.
+                preview = raw[:500] if isinstance(raw, str) else repr(raw)[:500]
+                logger.warning(
+                    "structured_output missing AND plaintext result is not valid JSON; "
+                    "soft-failing to zero findings. raw_result_preview=%r",
+                    preview,
+                )
                 output = {}
         else:
+            logger.warning(
+                "structured_output missing and result text is None; "
+                "soft-failing to zero findings (stop_reason=%s num_turns=%s).",
+                getattr(result_message, "stop_reason", None),
+                getattr(result_message, "num_turns", None),
+            )
             output = {}
 
     return (output, result_message)

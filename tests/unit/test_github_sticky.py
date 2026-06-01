@@ -44,6 +44,28 @@ def test_find_sticky_comment_returns_none_when_no_marker() -> None:
     assert result is None
 
 
+def test_find_sticky_comment_ignores_non_bot_marker_when_bot_login_provided() -> None:
+    """Bot login filtering ignores human comments that contain the sticky marker."""
+    from coco_pr_review.github.sticky import find_sticky_comment
+
+    marker = "<!-- coco-pr-review:summary -->"
+
+    human_comment = MagicMock()
+    human_comment.body = f"Quoting the bot\n{marker}"
+    human_comment.user.login = "some-human-user"
+
+    bot_comment = MagicMock()
+    bot_comment.body = f"## Coco PR Review\n{marker}\n\nActual sticky"
+    bot_comment.user.login = "github-actions[bot]"
+
+    pr_mock = MagicMock()
+    pr_mock.get_issue_comments.return_value = [human_comment, bot_comment]
+
+    result = find_sticky_comment(pr_mock, bot_login="github-actions[bot]")
+
+    assert result is bot_comment
+
+
 # ---------------------------------------------------------------------------
 # upsert_sticky_comment — edit path
 # ---------------------------------------------------------------------------
@@ -87,6 +109,37 @@ def test_upsert_sticky_comment_creates_when_not_found() -> None:
     upsert_sticky_comment(pr_mock, new_body, sanitize_fn)
 
     pr_mock.create_issue_comment.assert_called_once()
+
+
+def test_upsert_sticky_comment_edits_bot_comment_when_human_marker_exists() -> None:
+    """Upsert targets the bot-authored sticky even if a human comment contains the marker."""
+    from coco_pr_review.github.sticky import upsert_sticky_comment
+
+    marker = "<!-- coco-pr-review:summary -->"
+
+    human_comment = MagicMock()
+    human_comment.body = f"Quoted summary\n{marker}"
+    human_comment.user.login = "some-human-user"
+
+    bot_comment = MagicMock()
+    bot_comment.body = f"Old sticky\n{marker}"
+    bot_comment.user.login = "github-actions[bot]"
+
+    pr_mock = MagicMock()
+    pr_mock.get_issue_comments.return_value = [human_comment, bot_comment]
+
+    sanitize_fn = MagicMock(side_effect=lambda body: body)
+
+    upsert_sticky_comment(
+        pr_mock,
+        "Updated sticky body",
+        sanitize_fn,
+        bot_login="github-actions[bot]",
+    )
+
+    bot_comment.edit.assert_called_once_with(body="Updated sticky body")
+    human_comment.edit.assert_not_called()
+    pr_mock.create_issue_comment.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +192,90 @@ def test_render_sticky_progress_contains_finding_count() -> None:
     body = render_sticky_progress(phase="verifying", run_result=run_result)
 
     assert "5" in body
+
+
+def _make_finding(
+    *,
+    severity: str,
+    title: str,
+    file: str,
+    start_line: int,
+    category: str,
+):
+    """Build a minimal Finding for sticky-render tests."""
+    from coco_pr_review.orchestration.base import Finding
+
+    return Finding(
+        file=file,
+        start_line=start_line,
+        end_line=start_line,
+        severity=severity,
+        category=category,
+        title=title,
+        evidence="evidence",
+        comment="comment",
+    )
+
+
+def test_render_sticky_final_lists_findings_with_title_and_location() -> None:
+    """The final sticky lists each finding's title, file:line, and category."""
+    from coco_pr_review.github.sticky import render_sticky_final
+
+    findings = [
+        _make_finding(
+            severity="blocker",
+            title="Null deref on empty list",
+            file="demo_bug.py",
+            start_line=10,
+            category="correctness",
+        ),
+        _make_finding(
+            severity="nit",
+            title="Prefer f-string",
+            file="util.py",
+            start_line=3,
+            category="style",
+        ),
+    ]
+
+    body = render_sticky_final(findings=findings, posted=2, skipped=0)
+
+    assert "### Findings" in body
+    assert "Null deref on empty list" in body
+    assert "`demo_bug.py:10`" in body
+    assert "(correctness)" in body
+    assert "Prefer f-string" in body
+    assert "`util.py:3`" in body
+    # Severity table still present.
+    assert "| 🔴 blocker | 1 |" in body
+
+
+def test_render_sticky_final_orders_blocker_before_nit() -> None:
+    """Findings are listed blocker → warning → nit regardless of input order."""
+    from coco_pr_review.github.sticky import render_sticky_final
+
+    findings = [
+        _make_finding(
+            severity="nit", title="Nit one", file="a.py", start_line=1, category="style"
+        ),
+        _make_finding(
+            severity="blocker", title="Blocker one", file="b.py", start_line=2, category="security"
+        ),
+    ]
+
+    body = render_sticky_final(findings=findings, posted=2, skipped=0)
+
+    assert body.index("Blocker one") < body.index("Nit one")
+
+
+def test_render_sticky_final_omits_findings_section_when_empty() -> None:
+    """With zero findings, no Findings list is appended."""
+    from coco_pr_review.github.sticky import render_sticky_final
+
+    body = render_sticky_final(findings=[], posted=0, skipped=0)
+
+    assert "### Findings" not in body
+    assert "0 total findings" in body
 
 
 def test_render_sticky_skipped_mentions_reason() -> None:

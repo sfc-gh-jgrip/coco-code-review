@@ -31,18 +31,12 @@ from coco_pr_review.github.sticky import (
     render_sticky_final,
     upsert_sticky_comment,
 )
+from coco_pr_review.severity import emoji_for
 
 # ---------------------------------------------------------------------------
-# Severity constants
+# Default bot login
 # ---------------------------------------------------------------------------
 
-SEVERITY_EMOJI: dict[str, str] = {
-    "blocker": "🔴",
-    "warning": "🟡",
-    "nit": "⚪",
-}
-
-# Default bot login for GITHUB_TOKEN in Actions
 _DEFAULT_BOT_LOGIN = "github-actions[bot]"
 
 
@@ -82,7 +76,7 @@ def render_inline_comment_body(
     - Optional collapsible verifier reasoning (when verifier_reasoning is not None)
     - Fingerprint marker as the last line
     """
-    emoji = SEVERITY_EMOJI.get(finding.severity, "⚪")
+    emoji = emoji_for(finding.severity)
     confidence_str = f"{finding.confidence}%" if finding.confidence is not None else "?%"
 
     parts: list[str] = []

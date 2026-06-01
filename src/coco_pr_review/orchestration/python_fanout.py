@@ -260,6 +260,15 @@ class PythonFanoutOrchestrator(Orchestrator):
         changed_files_map = _build_changed_files_map(changed_files)
         user_prompt = _build_reviewer_user_prompt(pr_context, changed_files_map)
 
+        _diff = getattr(pr_context, "unified_diff", None) or getattr(pr_context, "diff", None)
+        logger.info(
+            "review input: %d changed file(s), unified_diff=%s (len=%d), user_prompt_len=%d",
+            len(changed_files),
+            "present" if _diff else "ABSENT",
+            len(_diff) if _diff else 0,
+            len(user_prompt),
+        )
+
         total_cost: float = 0.0
         total_turns: int = 0
 
@@ -283,6 +292,7 @@ class PythonFanoutOrchestrator(Orchestrator):
             output, result = await self._run_one_query(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
+                output_schema=REVIEWER_OUTPUT_SCHEMA,
             )
             # Register cost and turns.
             cost = getattr(result, "total_cost_usd", None) or 0
@@ -305,30 +315,82 @@ class PythonFanoutOrchestrator(Orchestrator):
 
             # Expect {"findings": [...]}.
             findings_list = output.get("findings", []) if isinstance(output, dict) else []
+            if not isinstance(output, dict):
+                logger.warning(
+                    "Reviewer %s replica %d: output is %s, not a dict; treating as zero findings.",
+                    reviewer.name,
+                    _replica_idx,
+                    type(output).__name__,
+                )
+            elif not output:
+                logger.warning(
+                    "Reviewer %s replica %d: output is an empty dict (SDK soft-fail); zero findings.",
+                    reviewer.name,
+                    _replica_idx,
+                )
+            elif "findings" not in output:
+                logger.warning(
+                    "Reviewer %s replica %d: output has no 'findings' key (keys=%s); zero findings.",
+                    reviewer.name,
+                    _replica_idx,
+                    list(output.keys()),
+                )
+            else:
+                logger.info(
+                    "Reviewer %s replica %d: %d raw finding(s).",
+                    reviewer.name,
+                    _replica_idx,
+                    len(findings_list),
+                )
             # Defensive cap (server-side maxItems is the primary guard).
             return findings_list[:max_findings_per_replica]
 
         # Build the list of coroutines for all reviewer×replica pairs.
         reviewer_coros = []
+        reviewer_replica_count = 0
         for reviewer in active_reviewers:
             n_replicas = replica_counts.get(reviewer.name, 1)
             for replica_idx in range(n_replicas):
                 reviewer_coros.append(_invoke_reviewer(reviewer, replica_idx))
+                reviewer_replica_count += 1
 
         # Gather with return_exceptions=True — failures are isolated.
         results = await asyncio.gather(*reviewer_coros, return_exceptions=True)
 
         # Collect all raw findings, logging failures.
         all_raw_findings: list[dict[str, Any]] = []
+        reviewer_exception_count = 0
+        reviewer_success_count = 0
         for r in results:
             if isinstance(r, BaseException):
                 logger.warning("Reviewer replica failed: %s", r)
                 progress.phase_completed("reviewer_replica_error", str(r))
+                reviewer_exception_count += 1
                 continue
+            reviewer_success_count += 1
             all_raw_findings.extend(r)
+
+        if reviewer_replica_count > 0 and reviewer_success_count == 0:
+            progress.phase_completed("reviewer_fanout", "all reviewer replicas failed")
+            return RunResult(
+                findings=[],
+                candidate_count=0,
+                deduped_count=0,
+                total_cost_usd=total_cost,
+                total_turns=total_turns,
+                aborted=True,
+                abort_reason="all reviewer replicas failed",
+            )
 
         candidate_count = len(all_raw_findings)
         progress.phase_completed("reviewer_fanout", f"{candidate_count} candidates")
+        logger.info(
+            "reviewer fanout complete: %d candidate(s) from %d/%d replica(s) (%d failed).",
+            candidate_count,
+            reviewer_success_count,
+            reviewer_replica_count,
+            reviewer_exception_count,
+        )
 
         # ---------------------------------------------------------------
         # Dedupe by fingerprint
@@ -368,6 +430,7 @@ class PythonFanoutOrchestrator(Orchestrator):
             output, result = await self._run_one_query(
                 system_prompt=verifier.system_prompt,
                 user_prompt=v_user_prompt,
+                output_schema=VERIFIER_OUTPUT_SCHEMA,
             )
             # Register cost and turns.
             cost = getattr(result, "total_cost_usd", None) or 0
@@ -395,13 +458,20 @@ class PythonFanoutOrchestrator(Orchestrator):
         #   - lines_in_pr == False
         # This is non-negotiable — pre-existing issues are out of scope.
         verified_findings: list[Finding] = []
+        dropped_verifier_error = 0
+        dropped_unparseable = 0
+        dropped_low_confidence = 0
+        dropped_evidence_mismatch = 0
+        dropped_not_in_pr = 0
         for vr in verifier_results:
             if isinstance(vr, BaseException):
                 # Verifier exception → drop the finding.
                 logger.warning("Verifier failed for one candidate: %s", vr)
+                dropped_verifier_error += 1
                 continue
             if vr is None:
                 # Verifier returned unparseable output → drop.
+                dropped_unparseable += 1
                 continue
 
             candidate, verification = vr
@@ -409,10 +479,13 @@ class PythonFanoutOrchestrator(Orchestrator):
             # --- MANDATORY DROPS (no "optionally" hedge) ---
             confidence = verification.get("confidence", 0)
             if confidence < confidence_threshold:
+                dropped_low_confidence += 1
                 continue
             if verification.get("evidence_matches") is False:
+                dropped_evidence_mismatch += 1
                 continue
             if verification.get("lines_in_pr") is False:
+                dropped_not_in_pr += 1
                 continue
 
             # Finding survived all filters — emit it.
@@ -421,6 +494,19 @@ class PythonFanoutOrchestrator(Orchestrator):
             progress.finding_emitted(finding)
 
         progress.phase_completed("verifier_fanout", f"{len(verified_findings)} verified")
+        logger.info(
+            "verifier filter complete: %d verified from %d deduped candidate(s) "
+            "(dropped: verifier_error=%d unparseable=%d low_confidence=%d "
+            "evidence_mismatch=%d not_in_pr=%d; threshold=%d).",
+            len(verified_findings),
+            deduped_count,
+            dropped_verifier_error,
+            dropped_unparseable,
+            dropped_low_confidence,
+            dropped_evidence_mismatch,
+            dropped_not_in_pr,
+            confidence_threshold,
+        )
 
         return RunResult(
             findings=verified_findings,

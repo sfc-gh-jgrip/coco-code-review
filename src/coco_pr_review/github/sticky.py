@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from coco_pr_review.severity import emoji_for, severity_rank
+
 SUMMARY_MARKER = "<!-- coco-pr-review:summary -->"
 
 
@@ -90,7 +92,9 @@ def render_sticky_final(
 ) -> str:
     """Render the final sticky comment body after publishing.
 
-    Includes the summary marker and a severity breakdown table.
+    Includes the summary marker, a severity breakdown table, and a per-finding
+    list (title, location, category) so reviewers can see what was flagged
+    without scrolling through inline comments.
     """
     blocker_count = sum(1 for f in findings if f.severity == "blocker")
     warning_count = sum(1 for f in findings if f.severity == "warning")
@@ -112,6 +116,17 @@ def render_sticky_final(
         "",
         f"{total} total findings · {posted} posted · {skipped} skipped (duplicates)",
     ]
+
+    if findings:
+        # Most-severe first; severity ordering is owned by the severity module.
+        ordered = sorted(findings, key=lambda f: severity_rank(f.severity))
+        lines.extend(["", "### Findings"])
+        for finding in ordered:
+            location = f"`{finding.file}:{finding.start_line}`"
+            lines.append(
+                f"- {emoji_for(finding.severity)} **{finding.title}** — {location} ({finding.category})"
+            )
+
     return "\n".join(lines)
 
 
