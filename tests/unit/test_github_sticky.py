@@ -329,3 +329,54 @@ def test_render_sticky_final_omits_degraded_note_when_no_failures() -> None:
     body = render_sticky_final(findings=[], posted=0, skipped=0)
 
     assert "results may be incomplete" not in body
+
+
+def _make_stats(**overrides):
+    """Build a PipelineStats with sensible defaults for sticky-render tests."""
+    from coco_pr_review.orchestration.base import PipelineStats
+
+    defaults = dict(
+        reviewer_names=["bugs-and-security", "tests-coverage"],
+        replicas_dispatched=4,
+        replicas_succeeded=4,
+        replicas_failed=0,
+        raw_candidates=3,
+        deduped_candidates=2,
+        verified=0,
+        dropped_verifier_error=0,
+        dropped_unparseable=0,
+        dropped_low_confidence=1,
+        dropped_evidence_mismatch=0,
+        dropped_not_in_pr=1,
+        confidence_threshold=80,
+    )
+    defaults.update(overrides)
+    return PipelineStats(**defaults)
+
+
+def test_render_sticky_final_includes_analysis_funnel_when_stats_present() -> None:
+    """A zero-finding run still shows the funnel proving everything was analyzed."""
+    from coco_pr_review.github.sticky import render_sticky_final
+
+    body = render_sticky_final(findings=[], posted=0, skipped=0, stats=_make_stats())
+
+    assert "Analysis summary" in body
+    assert "bugs-and-security" in body
+    assert "tests-coverage" in body
+    # Funnel stages are visible.
+    assert "4 dispatched" in body
+    assert "3 raw" in body
+    assert "2 after dedupe" in body
+    # Filtered-out breakdown distinguishes a clean-but-filtered run from a broken one.
+    assert "low confidence 1" in body
+    assert "not in PR 1" in body
+    assert "confidence threshold ≥ 80" in body
+
+
+def test_render_sticky_final_omits_funnel_when_stats_absent() -> None:
+    """Without stats (e.g. legacy callers), no analysis section is rendered."""
+    from coco_pr_review.github.sticky import render_sticky_final
+
+    body = render_sticky_final(findings=[], posted=0, skipped=0)
+
+    assert "Analysis summary" not in body

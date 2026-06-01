@@ -829,6 +829,75 @@ async def test_total_cost_usd_none_does_not_crash() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_result_stats_funnel_populated_for_zero_findings() -> None:
+    """A run where every candidate is filtered still reports a full stats funnel.
+
+    This is the observability contract: a zero-finding result must be legible as
+    "reviewers ran, candidates were produced, all were filtered" rather than an
+    ambiguous silent zero.
+    """
+    from coco_pr_review.orchestration.base import (
+        BudgetGate,
+        NoOpProgressSink,
+        PullRequestContext,
+    )
+    from coco_pr_review.orchestration.python_fanout import PythonFanoutOrchestrator
+    from coco_pr_review.reviewer_spec import ReviewerSpec
+
+    reviewer = ReviewerSpec(
+        name="bugs-and-security",
+        description="Finds bugs",
+        model="claude-sonnet-4-6",
+        tools=["Read", "Glob", "Grep"],
+        system_prompt="You find bugs.",
+    )
+    verifier = ReviewerSpec(
+        name="verifier",
+        description="Verifies",
+        model="claude-opus-4-6",
+        tools=["Read", "Glob", "Grep"],
+        system_prompt="You verify.",
+    )
+
+    async def fake_run_one_query(*, system_prompt: str, user_prompt: str, **kwargs: Any) -> tuple[Any, Any]:
+        if "verify" in system_prompt.lower():
+            # Below threshold → dropped as low_confidence.
+            return _make_verification(confidence=10), _FakeResult(cost=0.001, turns=1)
+        return {"findings": [_make_finding(title="Maybe bug")]}, _FakeResult(cost=0.01, turns=2)
+
+    orch = PythonFanoutOrchestrator(run_one_query=fake_run_one_query)
+    pr_context = PullRequestContext(
+        repo_root=Path("/tmp/fake"),
+        changed_files=[],
+        unified_diff=None,
+        conventions_text=None,
+    )
+
+    result = await orch.run(
+        pr_context=pr_context,
+        reviewers=[reviewer],
+        verifier=verifier,
+        budget=BudgetGate(max_usd=10.0),
+        progress=NoOpProgressSink(),
+        confidence_threshold=80,
+    )
+
+    assert len(result.findings) == 0
+    assert result.aborted is False
+    assert result.stats is not None
+    stats = result.stats
+    assert stats.reviewer_names == ["bugs-and-security"]
+    assert stats.replicas_dispatched == 1
+    assert stats.replicas_succeeded == 1
+    assert stats.replicas_failed == 0
+    assert stats.raw_candidates == 1
+    assert stats.deduped_candidates == 1
+    assert stats.verified == 0
+    assert stats.dropped_low_confidence == 1
+    assert stats.confidence_threshold == 80
+
+
+@pytest.mark.asyncio
 async def test_reviewer_invalid_output_counts_as_failed_replica_not_silent_zero() -> None:
     """A schema-invalid reviewer replica is a counted failure, not a silent zero.
 

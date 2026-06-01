@@ -54,6 +54,30 @@ class PullRequestContext:
 
 
 @dataclass
+class PipelineStats:
+    """Observability funnel for a review run.
+
+    Makes a zero-finding result legible: it distinguishes "every reviewer ran
+    and nothing survived the filters" from "the pipeline never produced
+    candidates". Counts mirror the orchestrator's internal tallies.
+    """
+
+    reviewer_names: list[str]  # distinct active (non-disabled) reviewers
+    replicas_dispatched: int  # reviewer×replica coroutines launched
+    replicas_succeeded: int
+    replicas_failed: int  # == RunResult.reviewer_failures
+    raw_candidates: int  # findings collected pre-dedupe
+    deduped_candidates: int  # candidates sent to the verifier
+    verified: int  # findings that survived every filter
+    dropped_verifier_error: int
+    dropped_unparseable: int
+    dropped_low_confidence: int
+    dropped_evidence_mismatch: int
+    dropped_not_in_pr: int
+    confidence_threshold: int
+
+
+@dataclass
 class RunResult:
     """The outcome of an orchestrator run."""
 
@@ -68,6 +92,9 @@ class RunResult:
     # output). Non-zero on a non-aborted run signals partial degradation: results
     # may be incomplete. Defaulted so existing callers/tests are unaffected.
     reviewer_failures: int = 0
+    # Full analysis funnel for the summary comment. Defaulted to None so existing
+    # callers/tests that construct RunResult positionally are unaffected.
+    stats: PipelineStats | None = None
 
 
 # ---------------------------------------------------------------------------

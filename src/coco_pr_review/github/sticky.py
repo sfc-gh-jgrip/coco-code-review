@@ -84,12 +84,52 @@ def render_sticky_progress(
     return "\n".join(lines)
 
 
+def _render_analysis_summary(stats: Any) -> list[str]:
+    """Render the analysis funnel as a collapsible section.
+
+    Surfaces the full pipeline funnel (reviewers → candidates → dedupe →
+    verifier filtering → verified) so a zero-finding result is legible as
+    "everything was analyzed and nothing survived the filters" rather than
+    "the pipeline silently did nothing".
+    """
+    reviewers = ", ".join(stats.reviewer_names) if stats.reviewer_names else "none"
+    dropped_total = (
+        stats.dropped_verifier_error
+        + stats.dropped_unparseable
+        + stats.dropped_low_confidence
+        + stats.dropped_evidence_mismatch
+        + stats.dropped_not_in_pr
+    )
+    return [
+        "",
+        "<details>",
+        "<summary>Analysis summary</summary>",
+        "",
+        f"- **Reviewers** ({len(stats.reviewer_names)}): {reviewers}",
+        f"- **Replicas**: {stats.replicas_dispatched} dispatched · "
+        f"{stats.replicas_succeeded} succeeded · {stats.replicas_failed} failed",
+        f"- **Candidates**: {stats.raw_candidates} raw → "
+        f"{stats.deduped_candidates} after dedupe",
+        f"- **Verified**: {stats.verified} (survived all filters)",
+        f"- **Filtered out** ({dropped_total}): "
+        f"low confidence {stats.dropped_low_confidence} · "
+        f"evidence mismatch {stats.dropped_evidence_mismatch} · "
+        f"not in PR {stats.dropped_not_in_pr} · "
+        f"verifier error {stats.dropped_verifier_error} · "
+        f"unparseable {stats.dropped_unparseable} "
+        f"(confidence threshold ≥ {stats.confidence_threshold})",
+        "",
+        "</details>",
+    ]
+
+
 def render_sticky_final(
     *,
     findings: list[Any],
     posted: int,
     skipped: int,
     reviewer_failures: int = 0,
+    stats: Any = None,
 ) -> str:
     """Render the final sticky comment body after publishing.
 
@@ -100,6 +140,9 @@ def render_sticky_final(
     When ``reviewer_failures`` is non-zero the run completed but some reviewer
     replicas failed (e.g. unparseable output), so results may be incomplete; a
     warning note is added to make that visible rather than implying a clean run.
+
+    When ``stats`` is provided, a collapsible "Analysis summary" funnel is
+    appended so a zero-finding result is distinguishable from a broken run.
     """
     blocker_count = sum(1 for f in findings if f.severity == "blocker")
     warning_count = sum(1 for f in findings if f.severity == "warning")
@@ -141,6 +184,9 @@ def render_sticky_final(
             lines.append(
                 f"- {emoji_for(finding.severity)} **{finding.title}** — {location} ({finding.category})"
             )
+
+    if stats is not None:
+        lines.extend(_render_analysis_summary(stats))
 
     return "\n".join(lines)
 
