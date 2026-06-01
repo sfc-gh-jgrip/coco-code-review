@@ -11,7 +11,11 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from coco_pr_review.severity import emoji_for, severity_rank
+from coco_pr_review.severity import (
+    PRE_EXISTING_EMOJI,
+    emoji_for,
+    severity_rank,
+)
 
 SUMMARY_MARKER = "<!-- coco-pr-review:summary -->"
 
@@ -100,6 +104,7 @@ def _render_analysis_summary(stats: Any) -> list[str]:
         + stats.dropped_evidence_mismatch
         + stats.dropped_not_in_pr
     )
+    pre_existing = getattr(stats, "pre_existing", 0)
     return [
         "",
         "<details>",
@@ -110,11 +115,12 @@ def _render_analysis_summary(stats: Any) -> list[str]:
         f"{stats.replicas_succeeded} succeeded · {stats.replicas_failed} failed",
         f"- **Candidates**: {stats.raw_candidates} raw → "
         f"{stats.deduped_candidates} after dedupe",
-        f"- **Verified**: {stats.verified} (survived all filters)",
+        f"- **Verified**: {stats.verified} (survived all filters) · "
+        f"{pre_existing} pre-existing surfaced",
         f"- **Filtered out** ({dropped_total}): "
         f"low confidence {stats.dropped_low_confidence} · "
         f"evidence mismatch {stats.dropped_evidence_mismatch} · "
-        f"not in PR {stats.dropped_not_in_pr} · "
+        f"out-of-diff dropped {stats.dropped_not_in_pr} · "
         f"verifier error {stats.dropped_verifier_error} · "
         f"unparseable {stats.dropped_unparseable} "
         f"(confidence threshold ≥ {stats.confidence_threshold})",
@@ -143,11 +149,18 @@ def render_sticky_final(
 
     When ``stats`` is provided, a collapsible "Analysis summary" funnel is
     appended so a zero-finding result is distinguishable from a broken run.
+
+    Pre-existing findings (real defects outside the PR's changed lines) are
+    listed in their own section and excluded from the in-diff severity table,
+    since they were not introduced by this PR.
     """
-    blocker_count = sum(1 for f in findings if f.severity == "blocker")
-    warning_count = sum(1 for f in findings if f.severity == "warning")
-    nit_count = sum(1 for f in findings if f.severity == "nit")
-    total = len(findings)
+    in_diff = [f for f in findings if not getattr(f, "pre_existing", False)]
+    pre_existing = [f for f in findings if getattr(f, "pre_existing", False)]
+
+    blocker_count = sum(1 for f in in_diff if f.severity == "blocker")
+    warning_count = sum(1 for f in in_diff if f.severity == "warning")
+    nit_count = sum(1 for f in in_diff if f.severity == "nit")
+    total = len(in_diff)
 
     lines = [
         "## 🤖 Coco PR Review",
@@ -175,14 +188,34 @@ def render_sticky_final(
             ]
         )
 
-    if findings:
+    if in_diff:
         # Most-severe first; severity ordering is owned by the severity module.
-        ordered = sorted(findings, key=lambda f: severity_rank(f.severity))
+        ordered = sorted(in_diff, key=lambda f: severity_rank(f.severity))
         lines.extend(["", "### Findings"])
         for finding in ordered:
             location = f"`{finding.file}:{finding.start_line}`"
             lines.append(
                 f"- {emoji_for(finding.severity)} **{finding.title}** — {location} ({finding.category})"
+            )
+
+    if pre_existing:
+        ordered_pre = sorted(pre_existing, key=lambda f: severity_rank(f.severity))
+        lines.extend(
+            [
+                "",
+                f"### {PRE_EXISTING_EMOJI} Pre-existing issues "
+                f"(not introduced by this PR)",
+                "",
+                f"{len(pre_existing)} real defect(s) found outside this PR's changed "
+                "lines. These are reported here and in the check run, but not as "
+                "inline comments (GitHub only allows inline comments on changed lines).",
+            ]
+        )
+        for finding in ordered_pre:
+            location = f"`{finding.file}:{finding.start_line}`"
+            lines.append(
+                f"- {PRE_EXISTING_EMOJI} {emoji_for(finding.severity)} "
+                f"**{finding.title}** — {location} ({finding.category})"
             )
 
     if stats is not None:

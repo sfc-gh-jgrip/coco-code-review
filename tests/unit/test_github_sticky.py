@@ -201,6 +201,7 @@ def _make_finding(
     file: str,
     start_line: int,
     category: str,
+    pre_existing: bool = False,
 ):
     """Build a minimal Finding for sticky-render tests."""
     from coco_pr_review.orchestration.base import Finding
@@ -214,6 +215,7 @@ def _make_finding(
         title=title,
         evidence="evidence",
         comment="comment",
+        pre_existing=pre_existing,
     )
 
 
@@ -248,6 +250,62 @@ def test_render_sticky_final_lists_findings_with_title_and_location() -> None:
     assert "`util.py:3`" in body
     # Severity table still present.
     assert "| 🔴 blocker | 1 |" in body
+
+
+def test_render_sticky_final_separates_pre_existing_section() -> None:
+    """Pre-existing findings get their own section and are excluded from the in-diff table."""
+    from coco_pr_review.github.sticky import render_sticky_final
+
+    findings = [
+        _make_finding(
+            severity="blocker",
+            title="In-diff null deref",
+            file="app.py",
+            start_line=10,
+            category="correctness",
+        ),
+        _make_finding(
+            severity="warning",
+            title="Pre-existing SQL injection",
+            file="db.py",
+            start_line=88,
+            category="security",
+            pre_existing=True,
+        ),
+    ]
+
+    body = render_sticky_final(findings=findings, posted=1, skipped=0)
+
+    # In-diff section + table count only the in-diff finding.
+    assert "### Findings" in body
+    assert "In-diff null deref" in body
+    assert "| 🔴 blocker | 1 |" in body
+    assert "| 🟡 warning | 0 |" in body
+    # Dedicated pre-existing section with the 🟣 marker.
+    assert "🟣 Pre-existing issues" in body
+    assert "Pre-existing SQL injection" in body
+    assert "`db.py:88`" in body
+    # The in-diff "X total findings" line counts only in-diff findings.
+    assert "1 total findings · 1 posted" in body
+
+
+def test_render_sticky_final_no_pre_existing_section_when_none() -> None:
+    """When there are no pre-existing findings, the pre-existing section is absent."""
+    from coco_pr_review.github.sticky import render_sticky_final
+
+    findings = [
+        _make_finding(
+            severity="nit",
+            title="Minor style",
+            file="x.py",
+            start_line=1,
+            category="style",
+        ),
+    ]
+
+    body = render_sticky_final(findings=findings, posted=1, skipped=0)
+
+    assert "Pre-existing issues" not in body
 
 
 def test_render_sticky_final_orders_blocker_before_nit() -> None:
@@ -392,7 +450,7 @@ def test_render_sticky_final_includes_analysis_funnel_when_stats_present() -> No
     assert "2 after dedupe" in body
     # Filtered-out breakdown distinguishes a clean-but-filtered run from a broken one.
     assert "low confidence 1" in body
-    assert "not in PR 1" in body
+    assert "out-of-diff dropped 1" in body
     assert "confidence threshold ≥ 80" in body
 
 

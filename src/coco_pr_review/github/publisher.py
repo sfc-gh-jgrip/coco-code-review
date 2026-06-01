@@ -171,11 +171,19 @@ class Publisher:
             if fp is not None:
                 seen_fps.add(fp)
 
-        # 2. Partition findings into new vs. skipped
+        # 2. Partition findings into new vs. skipped.
+        #
+        # Pre-existing findings (real defects outside the PR's changed lines)
+        # are NEVER posted inline — GitHub rejects inline comments on lines that
+        # are not part of the diff. They still flow to the check-run annotations
+        # and the sticky summary via ``run_result.findings`` (unfiltered below).
         new_findings: list[Any] = []
         skipped_findings: list[Any] = []
 
         for finding in run_result.findings:
+            if getattr(finding, "pre_existing", False):
+                # Routed to check-run + sticky only; never an inline comment.
+                continue
             fp = hash_finding_fingerprint(
                 file=finding.file,
                 start_line=finding.start_line,
@@ -239,6 +247,15 @@ class Publisher:
             except GithubException as exc:
                 if exc.status in (403, 404):
                     skipped_reason = "fork-pr-no-write"
+                elif exc.status == 422:
+                    # GitHub rejected the inline batch — typically a comment
+                    # targets a line not in the diff (e.g. the line moved since
+                    # the verifier judged it in-diff). This is non-fatal: every
+                    # finding still surfaces via the check-run annotations and
+                    # the sticky summary below. Record the degradation; do not
+                    # raise and lose the run.
+                    if skipped_reason is None:
+                        skipped_reason = "inline-rejected"
                 else:
                     raise
 

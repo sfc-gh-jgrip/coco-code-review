@@ -17,6 +17,7 @@ def _make_finding(
     verifier_reasoning: str | None = "Verified via trace analysis",
     suggested_fix: str | None = None,
     category: str = "correctness",
+    pre_existing: bool = False,
 ) -> MagicMock:
     """Create a mock finding with the standard shape."""
     f = MagicMock()
@@ -31,6 +32,7 @@ def _make_finding(
     f.verifier_reasoning = verifier_reasoning
     f.suggested_fix = suggested_fix
     f.category = category
+    f.pre_existing = pre_existing
     return f
 
 
@@ -503,3 +505,114 @@ def test_get_single_review_comments_failure() -> None:
     # Sticky and check run still work
     assert report.sticky_comment_id != 0
     assert report.check_run_id != 0
+
+
+# ---------------------------------------------------------------------------
+# Pre-existing findings — routed to check-run/sticky, never inline
+# ---------------------------------------------------------------------------
+
+
+def test_pre_existing_findings_excluded_from_inline_but_kept_for_checks() -> None:
+    """Pre-existing findings are not posted inline, but still flow to the check run."""
+    from coco_pr_review.github.publisher import Publisher
+
+    github_mock, repo_mock, pr_mock = _make_publisher_deps()
+    sanitize_fn = MagicMock(side_effect=lambda x: x)
+
+    publisher = Publisher(
+        github=github_mock,
+        repo_full_name="owner/repo",
+        pr_number=7,
+        head_sha="a" * 40,
+        sanitize_fn=sanitize_fn,
+    )
+
+    findings = [
+        _make_finding(file="src/a.py", start_line=1, end_line=2, title="In-diff bug", evidence="a"),
+        _make_finding(
+            file="src/b.py", start_line=5, end_line=6, title="Pre-existing bug",
+            evidence="b", pre_existing=True,
+        ),
+    ]
+    run_result = _make_run_result(findings)
+
+    report = publisher.publish(run_result, phase="final")
+
+    # Only the in-diff finding is posted inline.
+    assert report.comments_posted == 1
+    # The inline review batch contained exactly one comment (the in-diff one).
+    _, kwargs = pr_mock.create_review.call_args
+    posted_paths = [c["path"] for c in kwargs["comments"]]
+    assert posted_paths == ["src/a.py"]
+    # Both findings reach the check run (unfiltered run_result.findings).
+    _, check_kwargs = repo_mock.create_check_run.call_args
+    annotation_paths = {a["path"] for a in check_kwargs["output"]["annotations"]}
+    assert annotation_paths == {"src/a.py", "src/b.py"}
+
+
+def test_all_pre_existing_findings_post_no_inline_comments() -> None:
+    """A run with only pre-existing findings posts zero inline comments but still a check run."""
+    from coco_pr_review.github.publisher import Publisher
+
+    github_mock, repo_mock, pr_mock = _make_publisher_deps()
+    sanitize_fn = MagicMock(side_effect=lambda x: x)
+
+    publisher = Publisher(
+        github=github_mock,
+        repo_full_name="owner/repo",
+        pr_number=7,
+        head_sha="a" * 40,
+        sanitize_fn=sanitize_fn,
+    )
+
+    findings = [_make_finding(title="Pre-existing only", pre_existing=True)]
+    run_result = _make_run_result(findings)
+
+    report = publisher.publish(run_result, phase="final")
+
+    assert report.comments_posted == 0
+    # create_review is never called when there are no inline findings.
+    pr_mock.create_review.assert_not_called()
+    # Check run still created with the pre-existing finding annotated.
+    assert report.check_run_id != 0
+
+
+# ---------------------------------------------------------------------------
+# 422 on inline create_review is non-fatal (off-diff / moved line)
+# ---------------------------------------------------------------------------
+
+
+def test_publish_handles_422_inline_rejection_gracefully() -> None:
+    """A 422 from create_review (line not in diff) is non-fatal; findings survive via checks."""
+    from coco_pr_review.github.publisher import Publisher
+    from github import GithubException
+
+    github_mock, repo_mock, pr_mock = _make_publisher_deps()
+    sanitize_fn = MagicMock(side_effect=lambda x: x)
+
+    pr_mock.create_review.side_effect = GithubException(
+        status=422,
+        data={"message": "line must be part of the diff"},
+        headers={},
+    )
+
+    publisher = Publisher(
+        github=github_mock,
+        repo_full_name="owner/repo",
+        pr_number=7,
+        head_sha="e" * 40,
+        sanitize_fn=sanitize_fn,
+    )
+
+    findings = [_make_finding()]
+    run_result = _make_run_result(findings)
+
+    # Should NOT raise.
+    report = publisher.publish(run_result, phase="final")
+
+    assert report.comments_posted == 0
+    assert report.skipped_reason == "inline-rejected"
+    # Findings still surface via the check run + sticky.
+    assert report.check_run_id != 0
+    assert report.sticky_comment_id != 0
+

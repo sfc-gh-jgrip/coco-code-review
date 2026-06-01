@@ -199,8 +199,11 @@ def test_finding_asdict_validates_against_finding_schema() -> None:
     )
 
     d = dataclasses.asdict(f)
-    # Remove None values (schema doesn't require optional fields)
-    d = {k: v for k, v in d.items() if v is not None}
+    # Remove None values and internal verifier-derived fields (confidence,
+    # verifier_reasoning, pre_existing) that are not part of the reviewer-emitted
+    # FINDING_SCHEMA shape.
+    _internal = {"confidence", "verifier_reasoning", "pre_existing"}
+    d = {k: v for k, v in d.items() if v is not None and k not in _internal}
     jsonschema.validate(instance=d, schema=FINDING_SCHEMA)
 
 

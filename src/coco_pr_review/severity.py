@@ -22,6 +22,11 @@ SEVERITY_EMOJI: dict[str, str] = {
 # constrains real findings to SEVERITIES).
 UNKNOWN_SEVERITY_EMOJI = "⚪"
 
+# Marker for a pre-existing finding (a real defect that lives outside the PR's
+# changed lines). Orthogonal to severity — a pre-existing finding still has a
+# real blocker/warning/nit severity; this marker only signals provenance.
+PRE_EXISTING_EMOJI = "🟣"
+
 
 def emoji_for(severity: str) -> str:
     """Display emoji for a severity, falling back for unknown values."""

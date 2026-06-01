@@ -635,8 +635,8 @@ async def test_mandatory_drop_evidence_matches_false() -> None:
 
 
 @pytest.mark.asyncio
-async def test_mandatory_drop_lines_in_pr_false() -> None:
-    """A finding with lines_in_pr=False is dropped even with confidence=90."""
+async def test_pre_existing_correctness_finding_is_surfaced_not_dropped() -> None:
+    """A correctness finding with lines_in_pr=False is kept and flagged pre_existing."""
     from coco_pr_review.orchestration.base import (
         BudgetGate,
         NoOpProgressSink,
@@ -665,10 +665,12 @@ async def test_mandatory_drop_lines_in_pr_false() -> None:
             return {
                 "confidence": 90,
                 "evidence_matches": True,
-                "lines_in_pr": False,  # ← MANDATORY DROP: pre-existing issue
-                "verifier_reasoning": "Lines are not in this PR.",
+                "lines_in_pr": False,  # pre-existing → surfaced (correctness)
+                "verifier_reasoning": "Real defect, but on a pre-existing line.",
             }, _FakeResult(cost=0.001, turns=1)
-        return {"findings": [_make_finding(title="Pre-existing bug")]}, _FakeResult()
+        return {
+            "findings": [_make_finding(title="Pre-existing bug", category="correctness")]
+        }, _FakeResult()
 
     orch = PythonFanoutOrchestrator(run_one_query=fake_run_one_query)
     pr_context = PullRequestContext(
@@ -686,8 +688,71 @@ async def test_mandatory_drop_lines_in_pr_false() -> None:
         progress=NoOpProgressSink(),
     )
 
-    # Dropped: lines_in_pr=False regardless of confidence=90.
+    # Kept (not dropped) and flagged pre_existing; counted in stats.pre_existing.
+    assert len(result.findings) == 1
+    assert result.findings[0].pre_existing is True
+    assert result.stats.pre_existing == 1
+    assert result.stats.dropped_not_in_pr == 0
+
+
+@pytest.mark.asyncio
+async def test_pre_existing_non_correctness_finding_is_dropped() -> None:
+    """An out-of-diff finding in a non-correctness/security category is dropped as noise."""
+    from coco_pr_review.orchestration.base import (
+        BudgetGate,
+        NoOpProgressSink,
+        PullRequestContext,
+    )
+    from coco_pr_review.orchestration.python_fanout import PythonFanoutOrchestrator
+    from coco_pr_review.reviewer_spec import ReviewerSpec
+
+    reviewer = ReviewerSpec(
+        name="style-and-conventions",
+        description="Finds style issues",
+        model="claude-sonnet-4-6",
+        tools=["Read", "Glob", "Grep"],
+        system_prompt="You find style issues.",
+    )
+    verifier = ReviewerSpec(
+        name="verifier",
+        description="Verifies",
+        model="claude-opus-4-6",
+        tools=["Read", "Glob", "Grep"],
+        system_prompt="You verify.",
+    )
+
+    async def fake_run_one_query(*, system_prompt: str, user_prompt: str, **kwargs: Any) -> tuple[Any, Any]:
+        if "verify" in system_prompt.lower():
+            return {
+                "confidence": 90,
+                "evidence_matches": True,
+                "lines_in_pr": False,  # pre-existing style → dropped
+                "verifier_reasoning": "Style nit on a pre-existing line.",
+            }, _FakeResult(cost=0.001, turns=1)
+        return {
+            "findings": [_make_finding(title="Naming nit", category="style")]
+        }, _FakeResult()
+
+    orch = PythonFanoutOrchestrator(run_one_query=fake_run_one_query)
+    pr_context = PullRequestContext(
+        repo_root=Path("/tmp/fake"),
+        changed_files=[],
+        unified_diff=None,
+        conventions_text=None,
+    )
+
+    result = await orch.run(
+        pr_context=pr_context,
+        reviewers=[reviewer],
+        verifier=verifier,
+        budget=BudgetGate(max_usd=10.0),
+        progress=NoOpProgressSink(),
+    )
+
+    # Dropped: out-of-diff and not correctness/security.
     assert len(result.findings) == 0
+    assert result.stats.pre_existing == 0
+    assert result.stats.dropped_not_in_pr == 1
 
 
 @pytest.mark.asyncio

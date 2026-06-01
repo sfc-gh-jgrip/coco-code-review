@@ -38,6 +38,11 @@ from coco_pr_review.schema import REVIEWER_OUTPUT_SCHEMA, VERIFIER_OUTPUT_SCHEMA
 
 logger = logging.getLogger(__name__)
 
+# Categories for which a real defect OUTSIDE the PR's changed lines is still
+# surfaced (as a pre-existing finding) rather than dropped. Style/perf/test
+# findings on untouched code are too noisy to report, so they stay delta-scoped.
+_PRE_EXISTING_CATEGORIES = frozenset({"correctness", "security"})
+
 # Type alias for the injected query function.
 # Signature: async (*, system_prompt, user_prompt, **kwargs) -> (structured_output, result)
 RunOneQueryFn = Callable[..., Awaitable[tuple[Any, Any]]]
@@ -122,7 +127,12 @@ def _build_verifier_user_prompt(
     return "\n\n".join(parts)
 
 
-def _raw_finding_to_dataclass(raw: dict[str, Any], verification: dict[str, Any]) -> Finding:
+def _raw_finding_to_dataclass(
+    raw: dict[str, Any],
+    verification: dict[str, Any],
+    *,
+    pre_existing: bool = False,
+) -> Finding:
     """Merge raw finding dict with verifier output into a Finding dataclass."""
     return Finding(
         file=raw["file"],
@@ -136,6 +146,7 @@ def _raw_finding_to_dataclass(raw: dict[str, Any], verification: dict[str, Any])
         suggested_fix=raw.get("suggested_fix"),
         confidence=verification["confidence"],
         verifier_reasoning=verification.get("verifier_reasoning"),
+        pre_existing=pre_existing,
     )
 
 
@@ -468,14 +479,18 @@ class PythonFanoutOrchestrator(Orchestrator):
         # Drop a verified finding if ANY of:
         #   - confidence < threshold (default 80)
         #   - evidence_matches == False
-        #   - lines_in_pr == False
-        # This is non-negotiable — pre-existing issues are out of scope.
+        # A finding outside the PR's changed lines (lines_in_pr == False) is
+        # NOT auto-dropped. If it is a real correctness/security defect it is
+        # KEPT and flagged ``pre_existing`` (routed to check-run + sticky only,
+        # never inline). Out-of-diff findings in other categories (style, test,
+        # perf) are still dropped as noise.
         verified_findings: list[Finding] = []
         dropped_verifier_error = 0
         dropped_unparseable = 0
         dropped_low_confidence = 0
         dropped_evidence_mismatch = 0
         dropped_not_in_pr = 0
+        pre_existing_count = 0
         for vr in verifier_results:
             if isinstance(vr, BaseException):
                 # Verifier exception → drop the finding.
@@ -497,12 +512,22 @@ class PythonFanoutOrchestrator(Orchestrator):
             if verification.get("evidence_matches") is False:
                 dropped_evidence_mismatch += 1
                 continue
+
+            # --- OUT-OF-DIFF ROUTING (not an auto-drop) ---
+            pre_existing = False
             if verification.get("lines_in_pr") is False:
-                dropped_not_in_pr += 1
-                continue
+                category = candidate.get("category", "")
+                if category not in _PRE_EXISTING_CATEGORIES:
+                    # Out-of-diff non-correctness/security finding → drop as noise.
+                    dropped_not_in_pr += 1
+                    continue
+                pre_existing = True
+                pre_existing_count += 1
 
             # Finding survived all filters — emit it.
-            finding = _raw_finding_to_dataclass(candidate, verification)
+            finding = _raw_finding_to_dataclass(
+                candidate, verification, pre_existing=pre_existing
+            )
             verified_findings.append(finding)
             progress.finding_emitted(finding)
 
@@ -510,7 +535,7 @@ class PythonFanoutOrchestrator(Orchestrator):
         logger.info(
             "verifier filter complete: %d verified from %d deduped candidate(s) "
             "(dropped: verifier_error=%d unparseable=%d low_confidence=%d "
-            "evidence_mismatch=%d not_in_pr=%d; threshold=%d).",
+            "evidence_mismatch=%d not_in_pr=%d; pre_existing=%d; threshold=%d).",
             len(verified_findings),
             deduped_count,
             dropped_verifier_error,
@@ -518,6 +543,7 @@ class PythonFanoutOrchestrator(Orchestrator):
             dropped_low_confidence,
             dropped_evidence_mismatch,
             dropped_not_in_pr,
+            pre_existing_count,
             confidence_threshold,
         )
 
@@ -544,5 +570,6 @@ class PythonFanoutOrchestrator(Orchestrator):
                 dropped_evidence_mismatch=dropped_evidence_mismatch,
                 dropped_not_in_pr=dropped_not_in_pr,
                 confidence_threshold=confidence_threshold,
+                pre_existing=pre_existing_count,
             ),
         )

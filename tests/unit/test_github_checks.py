@@ -14,6 +14,7 @@ def _make_finding(
     title: str = "Bug found",
     comment: str = "Fix this bug",
     evidence: str = "x = 1 / 0",
+    pre_existing: bool = False,
 ) -> MagicMock:
     """Create a mock finding with the standard shape."""
     f = MagicMock()
@@ -24,6 +25,7 @@ def _make_finding(
     f.title = title
     f.comment = comment
     f.evidence = evidence
+    f.pre_existing = pre_existing
     return f
 
 
@@ -147,6 +149,16 @@ def test_findings_to_annotations_returns_correct_dict_shape() -> None:
     assert ann["end_line"] == 12
     assert ann["title"] == "Bug found"
     assert ann["message"] == "Fix this bug"
+
+
+def test_findings_to_annotations_prefixes_pre_existing_title() -> None:
+    """Pre-existing findings get a [Pre-existing] title prefix in annotations."""
+    from coco_pr_review.github.checks import findings_to_annotations
+
+    findings = [_make_finding(title="Latent bug", pre_existing=True)]
+    annotations = findings_to_annotations(findings)
+
+    assert annotations[0]["title"] == "[Pre-existing] Latent bug"
 
 
 def test_findings_to_annotations_maps_severity_to_annotation_level() -> None:
