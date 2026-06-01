@@ -172,6 +172,7 @@ async def test_run_review_returns_aborted_without_publishing() -> None:
     from coco_pr_review.review_runner import run_review
 
     github_client = _make_github_client()
+    github_client.bot_login = "github-actions[bot]"
     github_client.changed_files = [ChangedFile(path="src/app.py", line_ranges=[(1, 3)])]
 
     run_result = _make_run_result(aborted=True, abort_reason="all reviewer replicas failed")
@@ -197,6 +198,13 @@ async def test_run_review_returns_aborted_without_publishing() -> None:
     assert result.run_result is run_result
     assert result.publish_report is None
     publisher.publish.assert_not_called()
+
+    # A failed sticky is posted so the degraded run is not silent — and it must
+    # carry the abort reason and disclaim a clean review.
+    github_client.pull_request.create_issue_comment.assert_called_once()
+    posted_body = github_client.pull_request.create_issue_comment.call_args.kwargs["body"]
+    assert "Review failed" in posted_body
+    assert "all reviewer replicas failed" in posted_body
 
 
 @pytest.mark.asyncio

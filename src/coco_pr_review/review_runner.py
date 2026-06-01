@@ -9,6 +9,7 @@ from coco_pr_review.config import CocoPRReviewConfig
 from coco_pr_review.github.diff import build_unified_diff
 from coco_pr_review.github.sticky import (
     render_sticky_diff_too_large,
+    render_sticky_failed,
     render_sticky_skipped,
     upsert_sticky_comment,
 )
@@ -106,6 +107,13 @@ async def run_review(
         progress=progress,
     )
     if getattr(run_result, "aborted", False):
+        reason = getattr(run_result, "abort_reason", None) or "the review could not be completed"
+        upsert_sticky_comment(
+            github_client.pull_request,
+            render_sticky_failed(reason=reason),
+            sanitize_fn,
+            bot_login=github_client.bot_login,
+        )
         return ReviewRunResult(status="aborted", run_result=run_result)
 
     publish_report = publisher.publish(run_result)

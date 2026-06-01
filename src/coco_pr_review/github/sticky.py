@@ -84,17 +84,65 @@ def render_sticky_progress(
     return "\n".join(lines)
 
 
+def _render_analysis_summary(stats: Any) -> list[str]:
+    """Render the analysis funnel as a collapsible section.
+
+    Surfaces the full pipeline funnel (reviewers → candidates → dedupe →
+    verifier filtering → verified) so a zero-finding result is legible as
+    "everything was analyzed and nothing survived the filters" rather than
+    "the pipeline silently did nothing".
+    """
+    reviewers = ", ".join(stats.reviewer_names) if stats.reviewer_names else "none"
+    dropped_total = (
+        stats.dropped_verifier_error
+        + stats.dropped_unparseable
+        + stats.dropped_low_confidence
+        + stats.dropped_evidence_mismatch
+        + stats.dropped_not_in_pr
+    )
+    return [
+        "",
+        "<details>",
+        "<summary>Analysis summary</summary>",
+        "",
+        f"- **Reviewers** ({len(stats.reviewer_names)}): {reviewers}",
+        f"- **Replicas**: {stats.replicas_dispatched} dispatched · "
+        f"{stats.replicas_succeeded} succeeded · {stats.replicas_failed} failed",
+        f"- **Candidates**: {stats.raw_candidates} raw → "
+        f"{stats.deduped_candidates} after dedupe",
+        f"- **Verified**: {stats.verified} (survived all filters)",
+        f"- **Filtered out** ({dropped_total}): "
+        f"low confidence {stats.dropped_low_confidence} · "
+        f"evidence mismatch {stats.dropped_evidence_mismatch} · "
+        f"not in PR {stats.dropped_not_in_pr} · "
+        f"verifier error {stats.dropped_verifier_error} · "
+        f"unparseable {stats.dropped_unparseable} "
+        f"(confidence threshold ≥ {stats.confidence_threshold})",
+        "",
+        "</details>",
+    ]
+
+
 def render_sticky_final(
     *,
     findings: list[Any],
     posted: int,
     skipped: int,
+    reviewer_failures: int = 0,
+    stats: Any = None,
 ) -> str:
     """Render the final sticky comment body after publishing.
 
     Includes the summary marker, a severity breakdown table, and a per-finding
     list (title, location, category) so reviewers can see what was flagged
     without scrolling through inline comments.
+
+    When ``reviewer_failures`` is non-zero the run completed but some reviewer
+    replicas failed (e.g. unparseable output), so results may be incomplete; a
+    warning note is added to make that visible rather than implying a clean run.
+
+    When ``stats`` is provided, a collapsible "Analysis summary" funnel is
+    appended so a zero-finding result is distinguishable from a broken run.
     """
     blocker_count = sum(1 for f in findings if f.severity == "blocker")
     warning_count = sum(1 for f in findings if f.severity == "warning")
@@ -117,6 +165,16 @@ def render_sticky_final(
         f"{total} total findings · {posted} posted · {skipped} skipped (duplicates)",
     ]
 
+    if reviewer_failures:
+        replica_word = "replica" if reviewer_failures == 1 else "replicas"
+        lines.extend(
+            [
+                "",
+                f"⚠️ {reviewer_failures} reviewer {replica_word} failed; "
+                "results may be incomplete.",
+            ]
+        )
+
     if findings:
         # Most-severe first; severity ordering is owned by the severity module.
         ordered = sorted(findings, key=lambda f: severity_rank(f.severity))
@@ -126,6 +184,9 @@ def render_sticky_final(
             lines.append(
                 f"- {emoji_for(finding.severity)} **{finding.title}** — {location} ({finding.category})"
             )
+
+    if stats is not None:
+        lines.extend(_render_analysis_summary(stats))
 
     return "\n".join(lines)
 
@@ -152,3 +213,25 @@ def render_sticky_diff_too_large(*, max_diff_lines: int) -> str:
             "Consider splitting this change into smaller PRs so the review can focus on the relevant code paths."
         ),
     )
+
+
+def render_sticky_failed(*, reason: str, details: str | None = None) -> str:
+    """Render the sticky body for a run that aborted before publishing.
+
+    Distinct from ``render_sticky_skipped`` (a deliberate, benign no-review):
+    this announces that the review attempted to run but failed (e.g. every
+    reviewer replica errored, or the budget tripped), so the absence of inline
+    comments must NOT be read as "no issues found". The user should re-run.
+    """
+    lines = [
+        "## 🤖 Coco PR Review",
+        SUMMARY_MARKER,
+        "",
+        f"❌ Review failed: {reason}",
+        "",
+        "This is an infrastructure failure, **not** a clean bill of health — "
+        "no findings were published. Please re-run the review.",
+    ]
+    if details:
+        lines.extend(["", details])
+    return "\n".join(lines)

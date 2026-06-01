@@ -73,6 +73,17 @@ class HardSdkError(Exception):
     """Non-retryable SDK failure — auth, billing, bad schema."""
 
 
+class StructuredOutputError(Exception):
+    """The terminal ResultMessage carried no usable structured output.
+
+    Raised when ``structured_output`` is absent AND the plaintext result cannot
+    be recovered as JSON. This is a fail-closed signal: callers MUST treat it as
+    "the model's output could not be parsed", never as "the model found nothing"
+    (an empty-but-valid result). Conflating the two silently hides a clean PR
+    behind an infrastructure failure (or vice versa).
+    """
+
+
 # ---------------------------------------------------------------------------
 # Error classification helper
 # ---------------------------------------------------------------------------
@@ -110,8 +121,9 @@ async def run_one_query(
 
     On success (the terminal ResultMessage), returns a tuple of:
       - ``structured_output``: parsed JSON from the result, or the fallback
-        from ``json.loads(result.result)`` if structured_output is None.
-        Returns ``{}`` if both paths fail (soft-fail to zero findings).
+        from ``extract_json(result.result)`` if structured_output is None.
+        Raises ``StructuredOutputError`` if both paths fail (fail-closed — a
+        parse failure is NEVER silently treated as zero findings).
       - The ResultMessage itself (callers read ``.total_cost_usd``,
         ``.num_turns``, etc.)
 
@@ -132,6 +144,9 @@ async def run_one_query(
         On rate-limit, server error, or unknown transient failures.
     HardSdkError
         On billing errors, auth failures, or invalid requests.
+    StructuredOutputError
+        When the result carries no usable structured output and the plaintext
+        result cannot be recovered as JSON (fail-closed).
     """
     result_message = None
 
@@ -165,32 +180,39 @@ async def run_one_query(
     # Extract structured output with fallback chain.
     output = getattr(result_message, "structured_output", None)
     if output is None:
-        # Fallback: try parsing the plaintext result as JSON.
+        # Fallback: try parsing the plaintext result as JSON. This is a DEGRADED
+        # path — schema enforcement did not populate structured_output, so we are
+        # recovering best-effort from fenced/prose text.
         raw = getattr(result_message, "result", None)
         if raw is not None:
             try:
                 output = extract_json(raw)
-                logger.debug(
-                    "structured_output missing; recovered JSON from plaintext result "
+                logger.warning(
+                    "degraded: recovered JSON from plaintext result because schema "
+                    "enforcement did not populate structured_output "
                     "(fence/prose tolerant, raw_len=%d).",
                     len(raw) if isinstance(raw, str) else -1,
                 )
-            except (json.JSONDecodeError, TypeError):
-                # Soft-fail: return empty dict → zero findings downstream.
+            except (json.JSONDecodeError, TypeError) as exc:
+                # Fail closed: an unparseable result is NOT "zero findings".
                 preview = raw[:500] if isinstance(raw, str) else repr(raw)[:500]
-                logger.warning(
+                logger.error(
                     "structured_output missing AND plaintext result is not valid JSON; "
-                    "soft-failing to zero findings. raw_result_preview=%r",
+                    "failing closed (no silent zero-findings). raw_result_preview=%r",
                     preview,
                 )
-                output = {}
+                raise StructuredOutputError(
+                    f"unparseable result text (preview={preview!r})"
+                ) from exc
         else:
-            logger.warning(
-                "structured_output missing and result text is None; "
-                "soft-failing to zero findings (stop_reason=%s num_turns=%s).",
+            logger.error(
+                "structured_output missing and result text is None; failing closed "
+                "(stop_reason=%s num_turns=%s).",
                 getattr(result_message, "stop_reason", None),
                 getattr(result_message, "num_turns", None),
             )
-            output = {}
+            raise StructuredOutputError(
+                "structured_output missing and result text is None"
+            )
 
     return (output, result_message)
