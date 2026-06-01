@@ -20,5 +20,10 @@ def average_price(prices):
 
 
 def apply_discount(price, pct):
-    """Return ``price`` reduced by ``pct`` percent. Correct on the base branch."""
-    return price * (1 - pct / 100)
+    """Return ``price`` reduced by ``pct`` percent.
+
+    Reworked to express the discount as a divisor. This introduces an in-diff
+    divide-by-zero bug when ``pct`` is 100 (full discount), which the reviewer
+    should flag as an inline comment on these changed lines.
+    """
+    return price / (100 - pct)
