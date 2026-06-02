@@ -29,6 +29,13 @@ import yaml
 
 _ORCHESTRATION_MODES = ("python-fanout", "swarm")
 _EFFORT_LEVELS = ("low", "medium", "high")
+
+# Effort profiles — named bundles of config overrides selected per-repo (config)
+# or per-PR (`@coco-review cheap|high`). A profile is layered between the raw
+# base defaults and the repo's `.coco-pr-review.yml`, so a repo can still tune
+# any individual knob a profile sets. See `_profile_overlays`.
+PROFILE_NAMES = ("high", "cheap")
+DEFAULT_PROFILE = "high"
 _TOOL_TIERS = ("read-only", "read-sql", "read-sql-bash")
 
 # Top-level YAML keys this loader recognises. Anything else raises ConfigError.
@@ -47,7 +54,7 @@ _ALLOWED_TOP_LEVEL = frozenset(
     }
 )
 
-_ALLOWED_ORCHESTRATION = frozenset({"mode"})
+_ALLOWED_ORCHESTRATION = frozenset({"mode", "profile"})
 _ALLOWED_DEFAULTS = frozenset({"model", "effort", "max_turns"})
 _ALLOWED_LIMITS = frozenset(
     {"max_usd_per_pr", "job_timeout_sec", "max_findings_per_reviewer"}
@@ -72,6 +79,10 @@ class ConfigError(ValueError):
 @dataclass(frozen=True)
 class OrchestrationConfig:
     mode: str = "python-fanout"
+    # The effort profile that was resolved for this config. Informational on the
+    # raw base/DEFAULT_CONFIG (no overlay applied); set to the active profile by
+    # `load_config` once an overlay is layered in.
+    profile: str = DEFAULT_PROFILE
 
 
 @dataclass(frozen=True)
@@ -145,6 +156,46 @@ def _default_reviewers() -> list[ReviewerOverride]:
     ]
 
 
+def _profile_overlays() -> dict[str, dict[str, Any]]:
+    """Built-in effort profiles, as config-dict overlays merged over the base.
+
+    Each overlay is a strict subset of the config-dict shape and is layered via
+    the same `_deep_merge`/`_merge_reviewers` machinery the file loader uses, so
+    a repo's `.coco-pr-review.yml` can still override anything a profile sets.
+
+    Reviewer scope is correctness/security focused (mirrors Anthropic's hosted
+    Code Review). `style-and-conventions` and `tests-coverage` are off by default
+    in both profiles; a repo re-enables one with a one-line overlay, e.g.
+    `reviewers: [{name: tests-coverage, enabled: true}]`. Replica counts, the
+    verifier, and limits are all knobs — tune freely.
+    """
+    return {
+        # high — the serious multi-lens review (bughunter-like): correctness +
+        # performance lenses, verifier on, generous 30-min budget.
+        "high": {
+            "limits": {"job_timeout_sec": 1800, "max_usd_per_pr": 4.00},
+            "reviewers": [
+                {"name": "bugs-and-security", "enabled": True, "replicas": 1},
+                {"name": "performance-and-cost", "enabled": True, "replicas": 1},
+                {"name": "style-and-conventions", "enabled": False},
+                {"name": "tests-coverage", "enabled": False},
+            ],
+        },
+        # cheap — the quick pass: one correctness reviewer, verifier still on
+        # (nearly free at low candidate counts), tight 10-min budget.
+        "cheap": {
+            "limits": {"job_timeout_sec": 600, "max_usd_per_pr": 1.00},
+            "verifier": {"enabled": True},
+            "reviewers": [
+                {"name": "bugs-and-security", "enabled": True, "replicas": 1},
+                {"name": "performance-and-cost", "enabled": False},
+                {"name": "style-and-conventions", "enabled": False},
+                {"name": "tests-coverage", "enabled": False},
+            ],
+        },
+    }
+
+
 def _build_default_config() -> CocoPRReviewConfig:
     return CocoPRReviewConfig(
         orchestration=OrchestrationConfig(),
@@ -178,12 +229,21 @@ def load_config(
     path: Path | str | None = None,
     *,
     cli_overrides: Mapping[str, Any] | None = None,
+    profile: str | None = None,
 ) -> CocoPRReviewConfig:
-    """Load a config file and layer on optional CLI overrides.
+    """Load a config file and layer on an effort profile + optional CLI overrides.
 
-    Precedence (lowest → highest): defaults → file → CLI overrides.
+    Precedence (lowest → highest): base defaults → profile overlay → file → CLI.
+
+    Profile selection (highest → lowest): explicit ``profile=`` arg (e.g. a
+    ``@coco-review cheap|high`` comment) > ``orchestration.profile`` in the CLI
+    overrides > ``orchestration.profile`` in the file > ``DEFAULT_PROFILE``.
+
+    ``load_config(None)`` with no profile returns the raw, un-profiled base
+    (== ``DEFAULT_CONFIG``); profile resolution only kicks in once a path, CLI
+    overrides, or an explicit ``profile`` is supplied.
     """
-    if path is None and not cli_overrides:
+    if path is None and not cli_overrides and profile is None:
         return _build_default_config()
 
     file_data: dict[str, Any] = {}
@@ -207,12 +267,43 @@ def load_config(
             )
         file_data = parsed
 
-    merged = _deep_merge(_default_dict(), file_data, source=file_label)
+    active_profile = (
+        profile
+        or _profile_from_dict(cli_overrides)
+        or _profile_from_dict(file_data)
+        or DEFAULT_PROFILE
+    )
+    if active_profile not in PROFILE_NAMES:
+        raise ConfigError(
+            f"unknown effort profile {active_profile!r}; "
+            f"allowed: {list(PROFILE_NAMES)}"
+        )
+
+    base = _deep_merge(
+        _default_dict(),
+        _profile_overlays()[active_profile],
+        source=f"<profile:{active_profile}>",
+    )
+    merged = _deep_merge(base, file_data, source=file_label)
 
     if cli_overrides:
         merged = _deep_merge(merged, dict(cli_overrides), source="<cli-overrides>")
 
+    # Record the profile that was actually applied.
+    merged["orchestration"]["profile"] = active_profile
+
     return _build_from_dict(merged, source=file_label)
+
+
+def _profile_from_dict(data: Mapping[str, Any] | None) -> str | None:
+    """Extract ``orchestration.profile`` from a config-dict, if present."""
+    if not isinstance(data, Mapping):
+        return None
+    orch = data.get("orchestration")
+    if not isinstance(orch, Mapping):
+        return None
+    value = orch.get("profile")
+    return value if isinstance(value, str) else None
 
 
 # ---------------------------------------------------------------------------
@@ -407,7 +498,13 @@ def _build_orchestration(data: Mapping[str, Any], *, source: str) -> Orchestrati
             f"{source}: orchestration.mode must be one of {list(_ORCHESTRATION_MODES)}, "
             f"got {mode!r}"
         )
-    return OrchestrationConfig(mode=mode)
+    profile = data.get("profile", DEFAULT_PROFILE)
+    if profile not in PROFILE_NAMES:
+        raise ConfigError(
+            f"{source}: orchestration.profile must be one of {list(PROFILE_NAMES)}, "
+            f"got {profile!r}"
+        )
+    return OrchestrationConfig(mode=mode, profile=profile)
 
 
 def _build_defaults(data: Mapping[str, Any], *, source: str) -> DefaultsConfig:
@@ -586,6 +683,8 @@ __all__ = [
     "CocoPRReviewConfig",
     "ConfigError",
     "DEFAULT_CONFIG",
+    "DEFAULT_PROFILE",
+    "PROFILE_NAMES",
     "DefaultsConfig",
     "LimitsConfig",
     "OrchestrationConfig",

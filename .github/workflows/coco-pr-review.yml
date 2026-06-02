@@ -26,6 +26,10 @@ jobs:
         contains(github.event.comment.body, '@coco-review')
       )
     runs-on: ubuntu-latest
+    # Backstop above the app's own watchdog (limits.job_timeout_sec, max 1800s
+    # in the high profile). The app aborts gracefully first with a real reason;
+    # this only fires if the process wedges entirely.
+    timeout-minutes: 35
 
     steps:
       - name: Check out pull request head

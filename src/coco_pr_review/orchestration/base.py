@@ -32,6 +32,12 @@ class Finding:
     suggested_fix: str | None = None
     confidence: int | None = None
     verifier_reasoning: str | None = None
+    # True when the verifier judged this a real defect that lives OUTSIDE the
+    # PR's changed lines (i.e. not introduced by this PR). Such findings are
+    # routed to the check-run annotations + sticky summary only — never posted
+    # as inline review comments, since GitHub rejects inline comments on lines
+    # that are not part of the diff.
+    pre_existing: bool = False
 
 
 @dataclass
@@ -75,6 +81,15 @@ class PipelineStats:
     dropped_evidence_mismatch: int
     dropped_not_in_pr: int
     confidence_threshold: int
+    # Count of real defects surfaced even though they live outside the PR's
+    # changed lines (correctness/security only). These are kept, not dropped;
+    # ``dropped_not_in_pr`` now only counts out-of-diff findings we chose to
+    # discard (e.g. non-correctness/security categories).
+    pre_existing: int = 0
+    # Distinct files the reviewers opened via Read while building context. Zero
+    # means the reviewers worked from the diff alone (or the SDK did not report
+    # tool calls). Surfaced in the summary as context-breadth observability.
+    files_read: int = 0
 
 
 @dataclass

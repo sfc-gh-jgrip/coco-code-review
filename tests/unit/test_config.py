@@ -81,7 +81,7 @@ def test_dataclass_field_names_match_yaml_spec_exactly() -> None:
         VerifierConfig,
     )
 
-    assert set(OrchestrationConfig.__dataclass_fields__) == {"mode"}
+    assert set(OrchestrationConfig.__dataclass_fields__) == {"mode", "profile"}
     assert set(DefaultsConfig.__dataclass_fields__) == {"model", "effort", "max_turns"}
     assert set(LimitsConfig.__dataclass_fields__) == {
         "max_usd_per_pr",
@@ -494,3 +494,100 @@ def test_public_api_reexports_from_package_root() -> None:
     assert hasattr(coco_pr_review, "find_config")
     assert hasattr(coco_pr_review, "CocoPRReviewConfig")
     assert hasattr(coco_pr_review, "ConfigError")
+
+
+# ---------------------------------------------------------------------------
+# Effort profiles (cheap / high)
+# ---------------------------------------------------------------------------
+
+
+def _enabled(cfg) -> set[str]:
+    return {r.name for r in cfg.reviewers if r.enabled}
+
+
+def test_high_profile_is_correctness_focused() -> None:
+    """`high` enables bugs + performance lenses, disables style/tests, 30-min budget."""
+    from coco_pr_review.config import load_config
+
+    cfg = load_config(None, profile="high")
+    assert cfg.orchestration.profile == "high"
+    assert _enabled(cfg) == {"bugs-and-security", "performance-and-cost"}
+    assert cfg.limits.job_timeout_sec == 1800
+    assert cfg.verifier.enabled is True
+
+
+def test_cheap_profile_is_single_reviewer_with_verifier() -> None:
+    """`cheap` runs one correctness reviewer, verifier on, 10-min budget."""
+    from coco_pr_review.config import load_config
+
+    cfg = load_config(None, profile="cheap")
+    assert cfg.orchestration.profile == "cheap"
+    assert _enabled(cfg) == {"bugs-and-security"}
+    assert cfg.limits.job_timeout_sec == 600
+    assert cfg.verifier.enabled is True
+
+
+def test_unknown_profile_raises() -> None:
+    from coco_pr_review.config import ConfigError, load_config
+
+    with pytest.raises(ConfigError):
+        load_config(None, profile="turbo")
+
+
+def test_load_config_none_returns_raw_base_not_profiled() -> None:
+    """`load_config(None)` with no profile is the un-trimmed base (== DEFAULT_CONFIG)."""
+    from coco_pr_review.config import DEFAULT_CONFIG, load_config
+
+    cfg = load_config(None)
+    assert cfg == DEFAULT_CONFIG
+    assert _enabled(cfg) == {
+        "bugs-and-security",
+        "tests-coverage",
+        "style-and-conventions",
+        "performance-and-cost",
+    }
+
+
+def test_file_selects_profile_via_orchestration_key(tmp_path: Path) -> None:
+    from coco_pr_review.config import load_config
+
+    cfg_path = tmp_path / ".coco-pr-review.yml"
+    cfg_path.write_text("orchestration:\n  profile: cheap\n")
+    cfg = load_config(cfg_path)
+    assert cfg.orchestration.profile == "cheap"
+    assert _enabled(cfg) == {"bugs-and-security"}
+
+
+def test_explicit_profile_arg_beats_file(tmp_path: Path) -> None:
+    from coco_pr_review.config import load_config
+
+    cfg_path = tmp_path / ".coco-pr-review.yml"
+    cfg_path.write_text("orchestration:\n  profile: cheap\n")
+    cfg = load_config(cfg_path, profile="high")
+    assert cfg.orchestration.profile == "high"
+
+
+def test_file_overlay_reenables_reviewer_on_top_of_profile(tmp_path: Path) -> None:
+    """One-line opt-in: a repo re-enables tests-coverage over the high profile."""
+    from coco_pr_review.config import load_config
+
+    cfg_path = tmp_path / ".coco-pr-review.yml"
+    cfg_path.write_text(
+        "orchestration:\n  profile: high\n"
+        "reviewers:\n  - name: tests-coverage\n    enabled: true\n"
+    )
+    cfg = load_config(cfg_path)
+    assert "tests-coverage" in _enabled(cfg)
+    assert "bugs-and-security" in _enabled(cfg)
+
+
+def test_file_knob_overrides_profile_default(tmp_path: Path) -> None:
+    """A file limit beats the profile's limit (file is higher precedence)."""
+    from coco_pr_review.config import load_config
+
+    cfg_path = tmp_path / ".coco-pr-review.yml"
+    cfg_path.write_text(
+        "orchestration:\n  profile: high\nlimits:\n  job_timeout_sec: 1200\n"
+    )
+    cfg = load_config(cfg_path)
+    assert cfg.limits.job_timeout_sec == 1200

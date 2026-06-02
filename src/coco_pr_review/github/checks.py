@@ -13,7 +13,12 @@ from typing import Any, Callable
 
 from github import GithubException
 
-from coco_pr_review.severity import SEVERITIES, emoji_for, severity_rank
+from coco_pr_review.severity import (
+    PRE_EXISTING_EMOJI,
+    SEVERITIES,
+    emoji_for,
+    severity_rank,
+)
 
 SEVERITY_TO_LEVEL: dict[str, str] = {
     "blocker": "failure",
@@ -22,6 +27,18 @@ SEVERITY_TO_LEVEL: dict[str, str] = {
 }
 
 _MAX_ANNOTATIONS_PER_CALL = 50
+
+
+def _is_pre_existing(finding: Any) -> bool:
+    """True when a finding lives outside the PR's changed lines."""
+    return bool(getattr(finding, "pre_existing", False))
+
+
+def _annotation_title(finding: Any) -> str:
+    """Annotation title, prefixed for pre-existing (out-of-diff) findings."""
+    if _is_pre_existing(finding):
+        return f"[Pre-existing] {finding.title}"
+    return finding.title
 
 
 def _sort_key(finding: Any) -> tuple[int, str, int]:
@@ -48,6 +65,8 @@ def render_checks_output_text(findings: list[Any]) -> str:
     ]
     for f in sorted_findings:
         emoji = emoji_for(f.severity)
+        if _is_pre_existing(f):
+            emoji = f"{emoji} {PRE_EXISTING_EMOJI}"
         lines.append(f"| {emoji} | {f.file}:{f.start_line} | {f.title} |")
 
     # Severity counts
@@ -73,7 +92,7 @@ def findings_to_annotations(findings: list[Any]) -> list[dict[str, Any]]:
             "end_line": f.end_line,
             "annotation_level": SEVERITY_TO_LEVEL.get(f.severity, "notice"),
             "message": f.comment,
-            "title": f.title,
+            "title": _annotation_title(f),
         })
     return annotations
 
@@ -103,7 +122,7 @@ def publish_check_run(
             "end_line": f.end_line,
             "annotation_level": SEVERITY_TO_LEVEL.get(f.severity, "notice"),
             "message": sanitize_fn(f.comment),
-            "title": sanitize_fn(f.title),
+            "title": sanitize_fn(_annotation_title(f)),
         })
 
     # Count severities for summary

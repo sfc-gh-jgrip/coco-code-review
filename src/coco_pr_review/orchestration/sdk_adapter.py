@@ -60,6 +60,50 @@ def extract_json(raw: str) -> Any:
     raise json.JSONDecodeError("no JSON object found in result text", text, 0)
 
 
+def _read_paths_from_message(msg: Any) -> list[str]:
+    """Extract file paths opened by ``Read`` tool calls in one stream message.
+
+    Reviewer/verifier agents pull file context via the ``Read`` tool. Each such
+    call appears as a ``ToolUseBlock`` on an ``AssistantMessage.content`` list.
+    We harvest those paths so the orchestrator can report how much context the
+    reviewers actually read (vs. working from the diff alone).
+
+    Identification is by structural contract, NOT by a ``.type`` discriminator:
+    the real ``cortex_code_agent_sdk.types.ToolUseBlock`` is a dataclass with
+    only ``id``/``name``/``input`` — it has no ``type`` attribute (an earlier
+    implementation required ``type == "tool_use"`` and therefore matched nothing,
+    silently reporting zero files read). Among the four content-block types only
+    ``ToolUseBlock`` carries both ``name`` and ``input``, so duck-typing on those
+    uniquely identifies a tool call. The CLI's raw-dict form (tagged
+    ``{"type": "tool_use", ...}``) is also tolerated.
+
+    The tool name emitted by the CLI is lowercase ``read`` (NOT the ``Read``
+    spelling used in the agent ``.md`` frontmatter), so the match is
+    case-insensitive — verified against a live stream where every Read surfaced
+    as ``ToolUseBlock(name='read', input={'file_path': ...})``. Best-effort and
+    defensive: any unexpected shape is skipped silently — observability, never a gate.
+    """
+    content = getattr(msg, "content", None)
+    if not isinstance(content, list):
+        return []
+    paths: list[str] = []
+    for block in content:
+        if isinstance(block, dict):
+            name = block.get("name")
+            tool_input = block.get("input")
+        else:
+            name = getattr(block, "name", None)
+            tool_input = getattr(block, "input", None)
+        if not isinstance(name, str) or name.lower() != "read":
+            continue
+        if not isinstance(tool_input, dict):
+            continue
+        file_path = tool_input.get("file_path")
+        if isinstance(file_path, str) and file_path:
+            paths.append(file_path)
+    return paths
+
+
 # ---------------------------------------------------------------------------
 # Exception types
 # ---------------------------------------------------------------------------
@@ -149,11 +193,15 @@ async def run_one_query(
         result cannot be recovered as JSON (fail-closed).
     """
     result_message = None
+    files_read: list[str] = []
 
     async for msg in message_stream:
         # Mid-stream assistant message with an error field.
         if hasattr(msg, "error") and msg.error is not None:
             _raise_classified(msg.error)
+
+        # Harvest any Read tool-call file paths for context observability.
+        files_read.extend(_read_paths_from_message(msg))
 
         # Terminal result message.
         if hasattr(msg, "is_error"):
@@ -214,5 +262,13 @@ async def run_one_query(
             raise StructuredOutputError(
                 "structured_output missing and result text is None"
             )
+
+    # Attach the distinct set of files the agent Read during this query so the
+    # orchestrator can report context breadth. Best-effort: if the SDK message
+    # object forbids attribute assignment, skip silently (observability only).
+    try:
+        result_message.files_read = sorted(set(files_read))
+    except (AttributeError, TypeError):
+        pass
 
     return (output, result_message)

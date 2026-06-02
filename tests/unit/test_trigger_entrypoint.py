@@ -284,7 +284,7 @@ def test_main_returns_non_zero_for_aborted_review() -> None:
         monkeypatch.setenv("SNOWFLAKE_ACCOUNT", "acct")
         monkeypatch.setenv("SNOWFLAKE_HOST", "acct.snowflakecomputing.com")
         monkeypatch.setattr("coco_pr_review.github_event.find_config", lambda repo_root: Path("/tmp/coco.toml"))
-        monkeypatch.setattr("coco_pr_review.github_event.load_config", lambda path: MagicMock(limits=MagicMock(max_usd_per_pr=1, job_timeout_sec=1), reviewer=MagicMock(confidence_threshold=80)))
+        monkeypatch.setattr("coco_pr_review.github_event.load_config", lambda path, profile=None: MagicMock(limits=MagicMock(max_usd_per_pr=1, job_timeout_sec=1), reviewer=MagicMock(confidence_threshold=80)))
         monkeypatch.setattr("coco_pr_review.github_event.parse_agent_md", lambda path: MagicMock(system_prompt="prompt"))
         monkeypatch.setattr("coco_pr_review.github_event.discover_conventions", lambda repo_root: None)
         monkeypatch.setattr("coco_pr_review.github_event.Github", lambda auth: github)
@@ -306,7 +306,7 @@ def test_main_returns_zero_for_reviewed_result() -> None:
         monkeypatch.setenv("SNOWFLAKE_ACCOUNT", "acct")
         monkeypatch.setenv("SNOWFLAKE_HOST", "acct.snowflakecomputing.com")
         monkeypatch.setattr("coco_pr_review.github_event.find_config", lambda repo_root: Path("/tmp/coco.toml"))
-        monkeypatch.setattr("coco_pr_review.github_event.load_config", lambda path: MagicMock(limits=MagicMock(max_usd_per_pr=1, job_timeout_sec=1), reviewer=MagicMock(confidence_threshold=80)))
+        monkeypatch.setattr("coco_pr_review.github_event.load_config", lambda path, profile=None: MagicMock(limits=MagicMock(max_usd_per_pr=1, job_timeout_sec=1), reviewer=MagicMock(confidence_threshold=80)))
         monkeypatch.setattr("coco_pr_review.github_event.parse_agent_md", lambda path: MagicMock(system_prompt="prompt"))
         monkeypatch.setattr("coco_pr_review.github_event.discover_conventions", lambda repo_root: None)
         monkeypatch.setattr("coco_pr_review.github_event.Github", lambda auth: github)
@@ -314,3 +314,24 @@ def test_main_returns_zero_for_reviewed_result() -> None:
         monkeypatch.setattr("coco_pr_review.github_event.run_github_event", AsyncMock(return_value=_make_review_run_result(status="reviewed", aborted=False)))
 
         assert main() == 0
+
+# ---------------------------------------------------------------------------
+# Effort-profile comment parsing (@coco-review cheap|high)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_review_command_recognises_profiles() -> None:
+    from coco_pr_review.github_event import parse_review_command
+
+    assert parse_review_command("@coco-review cheap") == "cheap"
+    assert parse_review_command("@coco-review high") == "high"
+    assert parse_review_command("hey @coco-review  HIGH please") == "high"
+
+
+def test_parse_review_command_bare_or_unknown_returns_none() -> None:
+    from coco_pr_review.github_event import parse_review_command
+
+    assert parse_review_command("@coco-review") is None
+    assert parse_review_command("@coco-review turbo") is None
+    assert parse_review_command("no mention here") is None
+    assert parse_review_command("@coco-review\nthanks") is None

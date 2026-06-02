@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 import asyncio
 from contextlib import aclosing
@@ -14,7 +15,7 @@ from typing import Any
 from cortex_code_agent_sdk import CortexCodeAgentOptions, query
 from github import Auth, Github
 
-from coco_pr_review.config import find_config, load_config
+from coco_pr_review.config import PROFILE_NAMES, find_config, load_config
 from coco_pr_review.github.client import GitHubClient
 from coco_pr_review.github.publisher import Publisher
 from coco_pr_review.orchestration.base import BudgetGate, NoOpProgressSink
@@ -132,6 +133,24 @@ def is_comment_review_trigger(event: IssueCommentEvent) -> bool:
     )
 
 
+_REVIEW_COMMAND = re.compile(re.escape(TRIGGER_MENTION) + r"\s+([A-Za-z]+)")
+
+
+def parse_review_command(comment_body: str) -> str | None:
+    """Extract an effort-profile override from a ``@coco-review`` comment.
+
+    Recognises ``@coco-review cheap`` / ``@coco-review high``. A bare
+    ``@coco-review`` (or any unrecognised token) returns ``None`` so the caller
+    falls back to the config default profile. Tolerant of case and surrounding
+    text.
+    """
+    match = _REVIEW_COMMAND.search(comment_body)
+    if not match:
+        return None
+    token = match.group(1).lower()
+    return token if token in PROFILE_NAMES else None
+
+
 def resolve_head_sha(
     event: PullRequestEvent | IssueCommentEvent,
     github: Github,
@@ -242,7 +261,30 @@ def main() -> int:
     )
     repo_root = Path(os.environ.get("GITHUB_WORKSPACE", Path.cwd())).resolve()
     config_path = find_config(repo_root)
-    config = load_config(config_path)
+
+    # Parse the triggering event first: a `@coco-review cheap|high` comment can
+    # override the effort profile, which must be resolved before we load config.
+    try:
+        event_name, event_path = resolve_event_context()
+        payload = load_event_payload(event_path)
+        event = parse_github_event(
+            event_name=event_name, payload=payload, event_path=event_path
+        )
+    except UnsupportedGitHubEventError as exc:
+        print(str(exc))
+        return 1
+
+    profile_override = (
+        parse_review_command(event.comment_body)
+        if isinstance(event, IssueCommentEvent)
+        else None
+    )
+    config = load_config(config_path, profile=profile_override)
+    logging.getLogger("coco_pr_review").info(
+        "effort profile: %s%s",
+        config.orchestration.profile,
+        " (from @coco-review comment)" if profile_override else " (config default)",
+    )
 
     if not os.environ.get("SNOWFLAKE_ACCOUNT") or not os.environ.get("SNOWFLAKE_HOST"):
         print("SNOWFLAKE_ACCOUNT and SNOWFLAKE_HOST must be set for the review runtime")
@@ -303,9 +345,6 @@ def main() -> int:
     conventions_text = conventions_path.read_text() if conventions_path else None
 
     try:
-        event_name, event_path = resolve_event_context()
-        payload = load_event_payload(event_path)
-        event = parse_github_event(event_name=event_name, payload=payload, event_path=event_path)
         bot_login = os.environ.get("COCO_BOT_LOGIN", DEFAULT_BOT_LOGIN)
         head_sha = resolve_head_sha(event, github)
         publisher = Publisher(

@@ -301,3 +301,62 @@ async def test_run_one_query_raises_when_structured_output_missing_and_result_no
 
     with pytest.raises(StructuredOutputError):
         await run_one_query(message_stream=stream)
+
+
+# ---------------------------------------------------------------------------
+# files_read harvesting (context-breadth observability)
+# ---------------------------------------------------------------------------
+
+
+# Use the REAL SDK content-block type here, not a hand-rolled fake. The earlier
+# fake invented a `.type == "tool_use"` attribute that the real ToolUseBlock does
+# NOT have, AND used the `Read` spelling from the agent .md frontmatter. A live
+# stream proved the CLI actually emits ToolUseBlock(name='read', ...) (LOWERCASE)
+# with no `.type`. Importing the genuine dataclass and using the real lowercase
+# name keeps the test honest: if the SDK shape/name changes, this test breaks.
+from cortex_code_agent_sdk.types import ToolUseBlock
+
+
+def _read_block(file_path: str) -> ToolUseBlock:
+    # Lowercase 'read' — the real tool name as emitted by the CLI stream.
+    return ToolUseBlock(id="tu", name="read", input={"file_path": file_path})
+
+
+@pytest.mark.asyncio
+async def test_run_one_query_collects_distinct_read_paths() -> None:
+    """Read tool calls across the stream are harvested as distinct files_read."""
+    from coco_pr_review.orchestration.sdk_adapter import run_one_query
+
+    finding = {"file": "x.py", "start_line": 1, "end_line": 2, "severity": "warning",
+               "category": "correctness", "title": "bug", "evidence": "x", "comment": "y"}
+
+    msg1 = FakeAssistantMessage(content=[
+        _read_block("src/a.py"),
+        ToolUseBlock(id="tu", name="grep", input={"pattern": "foo"}),  # not a read
+    ])
+    msg2 = FakeAssistantMessage(content=[
+        _read_block("src/b.py"),
+        _read_block("src/a.py"),  # duplicate
+    ])
+    ok_result = FakeResultMessage(is_error=False, structured_output=finding)
+    stream = _fake_stream([msg1, msg2, ok_result])
+
+    _, result = await run_one_query(message_stream=stream)
+
+    assert result.files_read == ["src/a.py", "src/b.py"]
+
+
+@pytest.mark.asyncio
+async def test_run_one_query_files_read_empty_when_no_reads() -> None:
+    """A run with no Read tool calls reports an empty files_read list."""
+    from coco_pr_review.orchestration.sdk_adapter import run_one_query
+
+    finding = {"file": "x.py", "start_line": 1, "end_line": 2, "severity": "warning",
+               "category": "correctness", "title": "bug", "evidence": "x", "comment": "y"}
+    ok_result = FakeResultMessage(is_error=False, structured_output=finding)
+    stream = _fake_stream([FakeAssistantMessage(), ok_result])
+
+    _, result = await run_one_query(message_stream=stream)
+
+    assert result.files_read == []
+
