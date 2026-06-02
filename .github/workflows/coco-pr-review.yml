@@ -32,11 +32,31 @@ jobs:
     timeout-minutes: 35
 
     steps:
+      # issue_comment payloads do NOT carry the PR head SHA
+      # (github.event.issue.pull_request.head.sha is null), so without this the
+      # checkout below silently falls back to the default branch and the
+      # verifier reads the wrong tree → verified=0 → a good review sticky gets
+      # clobbered with "0 findings". Resolve the real head SHA from the API.
+      - name: Resolve PR head SHA (comment triggers)
+        id: pr-head
+        if: github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          sha=$(gh pr view "${{ github.event.issue.number }}" \
+            --repo "${{ github.repository }}" \
+            --json headRefOid --jq .headRefOid)
+          if [ -z "$sha" ]; then
+            echo "::error::could not resolve PR head SHA for issue #${{ github.event.issue.number }}"
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
       - name: Check out pull request head
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.event.issue.pull_request.head.sha }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || steps.pr-head.outputs.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@v5

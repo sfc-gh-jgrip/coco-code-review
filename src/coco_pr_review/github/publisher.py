@@ -29,6 +29,7 @@ from coco_pr_review.github.fingerprints import (
 from coco_pr_review.github.reactions import attach_reactions
 from coco_pr_review.github.sticky import (
     render_sticky_final,
+    render_sticky_unverified,
     upsert_sticky_comment,
 )
 from coco_pr_review.severity import emoji_for
@@ -261,13 +262,24 @@ class Publisher:
 
         # 5. Upsert sticky summary comment
         try:
-            sticky_body = render_sticky_final(
-                findings=run_result.findings,
-                posted=comments_posted,
-                skipped=len(skipped_findings),
-                reviewer_failures=getattr(run_result, "reviewer_failures", 0) or 0,
-                stats=getattr(run_result, "stats", None),
-            )
+            if not run_result.findings and getattr(run_result, "deduped_count", 0):
+                # Candidates survived dedupe but none verified. Rather than post a
+                # misleading "0 findings" (which would also clobber a prior good
+                # sticky), post an honest diagnostic. Common cause: the review ran
+                # against the wrong source tree, so the verifier couldn't confirm
+                # findings against files that aren't present.
+                sticky_body = render_sticky_unverified(
+                    candidate_count=run_result.deduped_count,
+                    stats=getattr(run_result, "stats", None),
+                )
+            else:
+                sticky_body = render_sticky_final(
+                    findings=run_result.findings,
+                    posted=comments_posted,
+                    skipped=len(skipped_findings),
+                    reviewer_failures=getattr(run_result, "reviewer_failures", 0) or 0,
+                    stats=getattr(run_result, "stats", None),
+                )
             sticky_comment = upsert_sticky_comment(pr, sticky_body, self._sanitize_fn, bot_login=self._bot_login)
             sticky_comment_id = getattr(sticky_comment, "id", None) or 0
         except Exception:

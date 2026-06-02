@@ -250,6 +250,36 @@ def render_sticky_diff_too_large(*, max_diff_lines: int) -> str:
     )
 
 
+def render_sticky_unverified(*, candidate_count: int, stats: Any = None) -> str:
+    """Render the sticky body when candidates were detected but none verified.
+
+    This is the "smells like a wrong source tree" case: reviewers proposed
+    ``candidate_count`` findings, but the verifier confirmed zero. The most
+    common cause is the review running against the wrong commit (e.g. a comment
+    trigger that checked out the default branch instead of the PR head), so the
+    verifier couldn't confirm the findings against files that aren't present.
+
+    Posting an honest diagnostic here — rather than a bare "0 findings" — keeps
+    a transient/mismatched run from silently overwriting a prior good review
+    sticky with a misleading clean bill of health.
+    """
+    candidate_word = "candidate" if candidate_count == 1 else "candidates"
+    lines = [
+        "## 🤖 Coco PR Review",
+        SUMMARY_MARKER,
+        "",
+        f"⚠️ {candidate_count} {candidate_word} detected, but none could be verified.",
+        "",
+        "This is not a clean review. It usually means the review ran against "
+        "the wrong source tree (e.g. the wrong commit was checked out), so the "
+        "verifier could not confirm the findings against the changed files. "
+        "Please re-run the review.",
+    ]
+    if stats is not None:
+        lines.extend(_render_analysis_summary(stats))
+    return "\n".join(lines)
+
+
 def render_sticky_failed(*, reason: str, details: str | None = None) -> str:
     """Render the sticky body for a run that aborted before publishing.
 
