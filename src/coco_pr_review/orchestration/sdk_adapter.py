@@ -64,32 +64,36 @@ def _read_paths_from_message(msg: Any) -> list[str]:
     """Extract file paths opened by ``Read`` tool calls in one stream message.
 
     Reviewer/verifier agents pull file context via the ``Read`` tool. Each such
-    call appears as a ``tool_use`` content block on an ``AssistantMessage`` with
-    ``input.file_path``. We harvest those paths so the orchestrator can report
-    how much context the reviewers actually read (vs. working from the diff
-    alone). Best-effort and defensive: blocks may be objects or dicts, and any
-    unexpected shape is skipped silently — this is observability, never a gate.
+    call appears as a ``ToolUseBlock`` on an ``AssistantMessage.content`` list.
+    We harvest those paths so the orchestrator can report how much context the
+    reviewers actually read (vs. working from the diff alone).
+
+    Identification is by structural contract, NOT by a ``.type`` discriminator:
+    the real ``cortex_code_agent_sdk.types.ToolUseBlock`` is a dataclass with
+    only ``id``/``name``/``input`` — it has no ``type`` attribute (the earlier
+    implementation required ``type == "tool_use"`` and therefore matched nothing,
+    silently reporting zero files read). Among the four content-block types only
+    ``ToolUseBlock`` carries both ``name`` and ``input``, so duck-typing on those
+    uniquely identifies a tool call. The CLI's raw-dict form (tagged
+    ``{"type": "tool_use", ...}``) is also tolerated. Best-effort and defensive:
+    any unexpected shape is skipped silently — this is observability, never a gate.
     """
     content = getattr(msg, "content", None)
     if not isinstance(content, list):
         return []
     paths: list[str] = []
     for block in content:
-        block_type = getattr(block, "type", None) or (
-            block.get("type") if isinstance(block, dict) else None
-        )
-        name = getattr(block, "name", None) or (
-            block.get("name") if isinstance(block, dict) else None
-        )
-        if block_type != "tool_use" or name != "Read":
+        if isinstance(block, dict):
+            name = block.get("name")
+            tool_input = block.get("input")
+        else:
+            name = getattr(block, "name", None)
+            tool_input = getattr(block, "input", None)
+        if name != "Read" or not isinstance(tool_input, dict):
             continue
-        tool_input = getattr(block, "input", None) or (
-            block.get("input") if isinstance(block, dict) else None
-        )
-        if isinstance(tool_input, dict):
-            file_path = tool_input.get("file_path")
-            if isinstance(file_path, str) and file_path:
-                paths.append(file_path)
+        file_path = tool_input.get("file_path")
+        if isinstance(file_path, str) and file_path:
+            paths.append(file_path)
     return paths
 
 

@@ -308,13 +308,16 @@ async def test_run_one_query_raises_when_structured_output_missing_and_result_no
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class FakeToolUseBlock:
-    """Mimics an SDK tool_use content block (e.g. a Read call)."""
+# Use the REAL SDK content-block type here, not a hand-rolled fake. The earlier
+# fake invented a `.type == "tool_use"` attribute that the real ToolUseBlock does
+# NOT have, so the harvester (which required that attribute) matched nothing in
+# CI while the tests stayed green. Importing the genuine dataclass keeps the test
+# honest: if the SDK block shape changes, this test breaks instead of lying.
+from cortex_code_agent_sdk.types import ToolUseBlock
 
-    name: str
-    input: dict
-    type: str = "tool_use"
+
+def _read_block(file_path: str) -> ToolUseBlock:
+    return ToolUseBlock(id="tu", name="Read", input={"file_path": file_path})
 
 
 @pytest.mark.asyncio
@@ -326,12 +329,12 @@ async def test_run_one_query_collects_distinct_read_paths() -> None:
                "category": "correctness", "title": "bug", "evidence": "x", "comment": "y"}
 
     msg1 = FakeAssistantMessage(content=[
-        FakeToolUseBlock(name="Read", input={"file_path": "src/a.py"}),
-        FakeToolUseBlock(name="Grep", input={"pattern": "foo"}),  # not a Read
+        _read_block("src/a.py"),
+        ToolUseBlock(id="tu", name="Grep", input={"pattern": "foo"}),  # not a Read
     ])
     msg2 = FakeAssistantMessage(content=[
-        FakeToolUseBlock(name="Read", input={"file_path": "src/b.py"}),
-        FakeToolUseBlock(name="Read", input={"file_path": "src/a.py"}),  # duplicate
+        _read_block("src/b.py"),
+        _read_block("src/a.py"),  # duplicate
     ])
     ok_result = FakeResultMessage(is_error=False, structured_output=finding)
     stream = _fake_stream([msg1, msg2, ok_result])
