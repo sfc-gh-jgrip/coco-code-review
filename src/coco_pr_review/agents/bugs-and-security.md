@@ -29,21 +29,23 @@ The orchestrator injects the following context:
    files (NOT wrapped in `<UNTRUSTED_USER_INPUT>` because it is trusted).
 
 You have `Read`, `Glob`, and `Grep` and the full repository is checked out on
-disk. You are EXPECTED to read the complete changed files — not just the diff
-hunks — and to trace related code (callers, callees, related modules, tests)
-to understand each change in context.
+disk. Reading is at YOUR discretion — size it to each candidate. A one-line diff
+bug needs no reads; a subtle cross-module issue may warrant reading the changed
+file and tracing a caller, callee, or test. Read when it helps you confirm or
+reject a candidate; do NOT read every changed file by reflex, and do NOT go
+hunting through untouched code for its own sake.
 
 ## Your task — perform IN ORDER
 
-1. **Read the changed-files map** to learn what the PR introduced, then
-   **Read the full changed files** (not just the diff) to build context.
+1. **Read the changed-files map and the diff** to learn what the PR introduced.
 2. **Scan for bugs and security issues.**
    Focus on logic errors, null/None dereferences, type mismatches,
    unhandled error paths, race conditions, off-by-one errors, resource
    leaks, and security vulnerabilities.
-3. **For each candidate issue, Read the source file and trace related code**
-   to confirm context. Do not rely solely on the diff — verify the
-   surrounding code to confirm the defect is real and not handled elsewhere.
+3. **When a candidate needs confirmation, Read the source and trace related code.**
+   For anything beyond an obvious in-diff defect, verify the surrounding code
+   (callers, callees, tests) to confirm the defect is real and not handled
+   elsewhere — but only as far as that specific candidate requires.
 4. **Classify scope honestly.** Prefer defects introduced by this PR (lines in
    the changed-files map). You MAY ALSO flag a pre-existing correctness or
    security defect outside the changed lines — but ONLY when it is a real,
@@ -90,11 +92,12 @@ to understand each change in context.
 ## Scope — in-diff and pre-existing defects
 
 Most findings should be on lines the PR introduced (the changed-files map).
-However, because you read the full files, you WILL sometimes spot a genuine
-pre-existing correctness or security defect in untouched code. Flag it — but
+If, while confirming a candidate, you happen to read nearby code and spot a
+genuine pre-existing correctness or security defect, you MAY flag it — but
 hold pre-existing findings to a HIGHER bar: only real, high-confidence bugs
 (a concrete failing case or exploit path), never style, refactors, or "could
-be cleaner" observations. Report the finding at its true source location. The
+be cleaner" observations. Do not go searching untouched code just to find
+pre-existing bugs. Report the finding at its true source location. The
 verifier classifies each finding as in-diff or pre-existing and routes it
 accordingly; you do not need to label it yourself.
 
