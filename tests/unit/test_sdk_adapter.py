@@ -310,14 +310,16 @@ async def test_run_one_query_raises_when_structured_output_missing_and_result_no
 
 # Use the REAL SDK content-block type here, not a hand-rolled fake. The earlier
 # fake invented a `.type == "tool_use"` attribute that the real ToolUseBlock does
-# NOT have, so the harvester (which required that attribute) matched nothing in
-# CI while the tests stayed green. Importing the genuine dataclass keeps the test
-# honest: if the SDK block shape changes, this test breaks instead of lying.
+# NOT have, AND used the `Read` spelling from the agent .md frontmatter. A live
+# stream proved the CLI actually emits ToolUseBlock(name='read', ...) (LOWERCASE)
+# with no `.type`. Importing the genuine dataclass and using the real lowercase
+# name keeps the test honest: if the SDK shape/name changes, this test breaks.
 from cortex_code_agent_sdk.types import ToolUseBlock
 
 
 def _read_block(file_path: str) -> ToolUseBlock:
-    return ToolUseBlock(id="tu", name="Read", input={"file_path": file_path})
+    # Lowercase 'read' — the real tool name as emitted by the CLI stream.
+    return ToolUseBlock(id="tu", name="read", input={"file_path": file_path})
 
 
 @pytest.mark.asyncio
@@ -330,7 +332,7 @@ async def test_run_one_query_collects_distinct_read_paths() -> None:
 
     msg1 = FakeAssistantMessage(content=[
         _read_block("src/a.py"),
-        ToolUseBlock(id="tu", name="Grep", input={"pattern": "foo"}),  # not a Read
+        ToolUseBlock(id="tu", name="grep", input={"pattern": "foo"}),  # not a read
     ])
     msg2 = FakeAssistantMessage(content=[
         _read_block("src/b.py"),

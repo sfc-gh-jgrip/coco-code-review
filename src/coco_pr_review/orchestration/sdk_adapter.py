@@ -70,13 +70,18 @@ def _read_paths_from_message(msg: Any) -> list[str]:
 
     Identification is by structural contract, NOT by a ``.type`` discriminator:
     the real ``cortex_code_agent_sdk.types.ToolUseBlock`` is a dataclass with
-    only ``id``/``name``/``input`` — it has no ``type`` attribute (the earlier
+    only ``id``/``name``/``input`` — it has no ``type`` attribute (an earlier
     implementation required ``type == "tool_use"`` and therefore matched nothing,
     silently reporting zero files read). Among the four content-block types only
     ``ToolUseBlock`` carries both ``name`` and ``input``, so duck-typing on those
     uniquely identifies a tool call. The CLI's raw-dict form (tagged
-    ``{"type": "tool_use", ...}``) is also tolerated. Best-effort and defensive:
-    any unexpected shape is skipped silently — this is observability, never a gate.
+    ``{"type": "tool_use", ...}``) is also tolerated.
+
+    The tool name emitted by the CLI is lowercase ``read`` (NOT the ``Read``
+    spelling used in the agent ``.md`` frontmatter), so the match is
+    case-insensitive — verified against a live stream where every Read surfaced
+    as ``ToolUseBlock(name='read', input={'file_path': ...})``. Best-effort and
+    defensive: any unexpected shape is skipped silently — observability, never a gate.
     """
     content = getattr(msg, "content", None)
     if not isinstance(content, list):
@@ -89,7 +94,9 @@ def _read_paths_from_message(msg: Any) -> list[str]:
         else:
             name = getattr(block, "name", None)
             tool_input = getattr(block, "input", None)
-        if name != "Read" or not isinstance(tool_input, dict):
+        if not isinstance(name, str) or name.lower() != "read":
+            continue
+        if not isinstance(tool_input, dict):
             continue
         file_path = tool_input.get("file_path")
         if isinstance(file_path, str) and file_path:
