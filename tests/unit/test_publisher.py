@@ -36,10 +36,18 @@ def _make_finding(
     return f
 
 
-def _make_run_result(findings: list) -> MagicMock:
-    """Create a mock RunResult."""
+def _make_run_result(findings: list, *, candidate_count: int = 0, deduped_count: int = 0) -> MagicMock:
+    """Create a mock RunResult.
+
+    ``candidate_count``/``deduped_count`` default to 0 (a genuinely clean run);
+    real ``RunResult`` carries integer counts, so the defaults keep MagicMock
+    from making them spuriously truthy and tripping the unverified-candidate
+    diagnostic guard.
+    """
     rr = MagicMock()
     rr.findings = findings
+    rr.candidate_count = candidate_count
+    rr.deduped_count = deduped_count
     return rr
 
 
@@ -392,6 +400,62 @@ def test_publish_no_findings() -> None:
     assert report.check_run_id != 0
     # No inline review was created (create_review not called)
     pr_mock.create_review.assert_not_called()
+
+
+def test_publish_unverified_candidates_posts_diagnostic_not_zero_findings() -> None:
+    """Candidates detected but none verified → sticky is an honest diagnostic,
+    not a misleading 'review complete, 0 findings' that would clobber a prior
+    good sticky."""
+    from coco_pr_review.github.publisher import Publisher
+
+    github_mock, repo_mock, pr_mock = _make_publisher_deps()
+    sanitize_fn = MagicMock(side_effect=lambda x: x)
+
+    publisher = Publisher(
+        github=github_mock,
+        repo_full_name="owner/repo",
+        pr_number=7,
+        head_sha="f" * 40,
+        sanitize_fn=sanitize_fn,
+    )
+
+    # 4 candidates survived dedupe, but zero were verified (empty findings).
+    run_result = _make_run_result([], candidate_count=4, deduped_count=4)
+
+    publisher.publish(run_result, phase="final")
+
+    # The sticky body posted must be the diagnostic, not the "complete" summary.
+    _, kwargs = pr_mock.create_issue_comment.call_args
+    body = kwargs["body"]
+    assert "none could be verified" in body
+    assert "Review complete" not in body
+    assert "not a clean review" in body.lower()
+
+
+def test_publish_genuinely_zero_findings_stays_clean() -> None:
+    """Zero candidates and zero findings → normal 'review complete' sticky,
+    the diagnostic guard must NOT fire on a genuinely clean run."""
+    from coco_pr_review.github.publisher import Publisher
+
+    github_mock, repo_mock, pr_mock = _make_publisher_deps()
+    sanitize_fn = MagicMock(side_effect=lambda x: x)
+
+    publisher = Publisher(
+        github=github_mock,
+        repo_full_name="owner/repo",
+        pr_number=7,
+        head_sha="f" * 40,
+        sanitize_fn=sanitize_fn,
+    )
+
+    run_result = _make_run_result([], candidate_count=0, deduped_count=0)
+
+    publisher.publish(run_result, phase="final")
+
+    _, kwargs = pr_mock.create_issue_comment.call_args
+    body = kwargs["body"]
+    assert "Review complete" in body
+    assert "could not be verified" not in body
 
 
 # ---------------------------------------------------------------------------

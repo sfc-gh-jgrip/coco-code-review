@@ -464,3 +464,19 @@ def test_render_sticky_final_omits_funnel_when_stats_absent() -> None:
     body = render_sticky_final(findings=[], posted=0, skipped=0)
 
     assert "Analysis summary" not in body
+
+
+def test_render_sticky_unverified_disclaims_clean_review_and_names_count() -> None:
+    """Unverified-candidates sticky carries the marker, the candidate count, and a
+    'not a clean review' disclaimer pointing at a likely wrong-tree checkout."""
+    from coco_pr_review.github.sticky import SUMMARY_MARKER, render_sticky_unverified
+
+    body = render_sticky_unverified(candidate_count=4)
+
+    assert SUMMARY_MARKER in body
+    assert "4" in body
+    # Must NOT read as a clean bill of health.
+    assert "not" in body.lower()
+    assert "re-run" in body.lower()
+    # Names the most likely cause so the operator can act.
+    assert "tree" in body.lower() or "commit" in body.lower()
