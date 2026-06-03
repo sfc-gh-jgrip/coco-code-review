@@ -280,6 +280,30 @@ def render_sticky_unverified(*, candidate_count: int, stats: Any = None) -> str:
     return "\n".join(lines)
 
 
+def choose_sticky_body(run_result: Any, *, posted: int = 0, skipped: int = 0) -> str:
+    """Pick the right sticky body for a completed run (the WS-A diagnostic guard).
+
+    Single source of truth shared by the PR publisher and the branch (commit)
+    publisher: when candidates survived dedupe but *none* verified, post the
+    honest "could not verify" diagnostic instead of a misleading "0 findings"
+    (which would also clobber a prior good sticky). Otherwise render the final
+    summary. ``posted``/``skipped`` are inline-comment counts (always 0 for the
+    branch path, which posts no inline comments).
+    """
+    if not run_result.findings and getattr(run_result, "deduped_count", 0):
+        return render_sticky_unverified(
+            candidate_count=run_result.deduped_count,
+            stats=getattr(run_result, "stats", None),
+        )
+    return render_sticky_final(
+        findings=run_result.findings,
+        posted=posted,
+        skipped=skipped,
+        reviewer_failures=getattr(run_result, "reviewer_failures", 0) or 0,
+        stats=getattr(run_result, "stats", None),
+    )
+
+
 def render_sticky_failed(*, reason: str, details: str | None = None) -> str:
     """Render the sticky body for a run that aborted before publishing.
 

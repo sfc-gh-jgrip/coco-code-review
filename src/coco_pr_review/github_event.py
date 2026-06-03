@@ -16,7 +16,10 @@ from cortex_code_agent_sdk import CortexCodeAgentOptions, query
 from github import Auth, Github
 
 from coco_pr_review.config import PROFILE_NAMES, find_config, load_config
+from coco_pr_review.git_diff import changed_files_from_git
+from coco_pr_review.github.branch_source import BranchReviewSource
 from coco_pr_review.github.client import GitHubClient
+from coco_pr_review.github.commit_publisher import CommitPublisher
 from coco_pr_review.github.publisher import Publisher
 from coco_pr_review.orchestration.base import BudgetGate, NoOpProgressSink
 from coco_pr_review.orchestration.sdk_adapter import run_one_query
@@ -53,6 +56,16 @@ class IssueCommentEvent:
     comment_body: str
     author_association: str
     is_pull_request: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PushEvent:
+    """A branch push with no pull request (the branch-review trigger)."""
+
+    repo_full_name: str
+    head_sha: str
+    ref: str
+    default_branch: str
 
 
 def load_event_payload(event_path: str | os.PathLike[str] | None = None) -> dict[str, Any]:
@@ -106,6 +119,51 @@ def parse_issue_comment_event(payload: dict[str, Any]) -> IssueCommentEvent:
         author_association=author_association,
         is_pull_request=is_pull_request,
     )
+
+
+def parse_push_event(payload: dict[str, Any]) -> PushEvent:
+    """Extract branch + head identity from a push event payload."""
+    repository = payload.get("repository")
+    if not isinstance(repository, dict):
+        raise UnsupportedGitHubEventError("push payload is missing repository data")
+
+    repo_full_name = repository.get("full_name")
+    default_branch = repository.get("default_branch")
+    head_sha = payload.get("after")
+    ref = payload.get("ref")
+    if not (
+        isinstance(repo_full_name, str)
+        and isinstance(default_branch, str)
+        and isinstance(head_sha, str)
+        and isinstance(ref, str)
+    ):
+        raise UnsupportedGitHubEventError(
+            "push payload is missing repo, default_branch, after, or ref"
+        )
+    return PushEvent(
+        repo_full_name=repo_full_name,
+        head_sha=head_sha,
+        ref=ref,
+        default_branch=default_branch,
+    )
+
+
+def should_review_push(event: PushEvent) -> bool:
+    """Whether a push should trigger a branch review.
+
+    Only branch-head pushes to a NON-default branch are reviewed: a push to the
+    default branch would diff against itself (empty), and tag/non-branch refs
+    have no branch to review. A branch deletion (all-zero ``after`` SHA) is
+    skipped too — there is nothing checked out to review.
+    """
+    if not event.ref.startswith("refs/heads/"):
+        return False
+    branch = event.ref[len("refs/heads/") :]
+    if branch == event.default_branch:
+        return False
+    if set(event.head_sha) <= {"0"}:
+        return False
+    return True
 
 
 def parse_github_event(
@@ -239,6 +297,56 @@ async def run_github_event(
     )
 
 
+async def run_branch_event(
+    *,
+    repo_root: Path,
+    config: Any,
+    reviewers: list[Any],
+    verifier: Any,
+    orchestrator: Any,
+    publisher: Any,
+    budget: Any,
+    progress: Any,
+    sanitize_fn: Any,
+    push_event: PushEvent,
+    github: Github,
+    base_ref: str,
+    bot_login: str = DEFAULT_BOT_LOGIN,
+    conventions_text: str | None = None,
+) -> ReviewRunResult:
+    """Dispatch a branch push (no PR) into the review runner.
+
+    Sources the changed files + unified diff from git (vs ``base_ref``) and feeds
+    them through the same ``run_review`` engine via a ``BranchReviewSource``.
+    A branch push is an explicit ask, so ``force_review=True`` (no draft gate).
+    """
+    changed_files, unified_diff = changed_files_from_git(
+        base_ref=base_ref, repo_root=repo_root, head=push_event.head_sha
+    )
+    source = BranchReviewSource(
+        github=github,
+        repo_full_name=push_event.repo_full_name,
+        head_sha=push_event.head_sha,
+        changed_files=changed_files,
+        bot_login=bot_login,
+    )
+    return await run_review(
+        repo_root=repo_root,
+        github_client=source,
+        config=config,
+        reviewers=reviewers,
+        verifier=verifier,
+        orchestrator=orchestrator,
+        publisher=publisher,
+        budget=budget,
+        progress=progress,
+        sanitize_fn=sanitize_fn,
+        unified_diff=unified_diff,
+        conventions_text=conventions_text,
+        force_review=True,
+    )
+
+
 def resolve_event_context() -> tuple[str | None, str | None]:
     """Resolve the event name and path, preferring explicit smoke overrides.
 
@@ -252,44 +360,16 @@ def resolve_event_context() -> tuple[str | None, str | None]:
     return event_name, event_path
 
 
-def main() -> int:
-    """CLI entrypoint for GitHub Actions event dispatch."""
-    logging.basicConfig(
-        level=os.environ.get("COCO_PR_REVIEW_LOG_LEVEL", "INFO").upper(),
-        stream=sys.stdout,
-        format="%(levelname)s %(name)s: %(message)s",
-    )
-    repo_root = Path(os.environ.get("GITHUB_WORKSPACE", Path.cwd())).resolve()
-    config_path = find_config(repo_root)
+def _build_review_runtime(
+    repo_root: Path, config: Any
+) -> tuple[list[Any], Any, Any, Any, Any, str | None]:
+    """Build the event-agnostic review runtime shared by the PR and branch paths.
 
-    # Parse the triggering event first: a `@coco-review cheap|high` comment can
-    # override the effort profile, which must be resolved before we load config.
-    try:
-        event_name, event_path = resolve_event_context()
-        payload = load_event_payload(event_path)
-        event = parse_github_event(
-            event_name=event_name, payload=payload, event_path=event_path
-        )
-    except UnsupportedGitHubEventError as exc:
-        print(str(exc))
-        return 1
-
-    profile_override = (
-        parse_review_command(event.comment_body)
-        if isinstance(event, IssueCommentEvent)
-        else None
-    )
-    config = load_config(config_path, profile=profile_override)
-    logging.getLogger("coco_pr_review").info(
-        "effort profile: %s%s",
-        config.orchestration.profile,
-        " (from @coco-review comment)" if profile_override else " (config default)",
-    )
-
-    if not os.environ.get("SNOWFLAKE_ACCOUNT") or not os.environ.get("SNOWFLAKE_HOST"):
-        print("SNOWFLAKE_ACCOUNT and SNOWFLAKE_HOST must be set for the review runtime")
-        return 1
-
+    Returns ``(reviewers, verifier, orchestrator, budget, progress,
+    conventions_text)``. Everything here is independent of *which* event
+    triggered the run, so both the PR/comment dispatch and the branch (push)
+    dispatch construct it identically.
+    """
     reviewers_dir = repo_root / "src" / "coco_pr_review" / "agents"
     reviewers = [
         parse_agent_md(reviewers_dir / "bugs-and-security.md"),
@@ -337,12 +417,148 @@ def main() -> int:
             return await run_one_query(message_stream=message_stream)
 
     orchestrator = PythonFanoutOrchestrator(run_one_query=run_one_query_with_sdk, config=config)
-    github = Github(auth=Auth.Token(os.environ["GITHUB_TOKEN"]))
     budget = BudgetGate(max_usd=config.limits.max_usd_per_pr)
     progress = NoOpProgressSink()
 
     conventions_path = discover_conventions(repo_root)
     conventions_text = conventions_path.read_text() if conventions_path else None
+
+    return reviewers, verifier, orchestrator, budget, progress, conventions_text
+
+
+def _finish_result(result: Any) -> int:
+    """Log the run summary and map a ``ReviewRunResult`` to a process exit code."""
+    if not isinstance(result, ReviewRunResult):
+        return 1
+
+    run_result = result.run_result
+    if run_result is not None:
+        logging.getLogger("coco_pr_review").info(
+            "review finished: status=%s candidates=%s deduped=%s verified=%s "
+            "cost_usd=%s aborted=%s reason=%s",
+            result.status,
+            getattr(run_result, "candidate_count", None),
+            getattr(run_result, "deduped_count", None),
+            len(getattr(run_result, "findings", []) or []),
+            getattr(run_result, "total_cost_usd", None),
+            getattr(run_result, "aborted", None),
+            getattr(run_result, "abort_reason", None),
+        )
+    else:
+        logging.getLogger("coco_pr_review").info(
+            "review finished: status=%s (no run_result)", result.status
+        )
+
+    if run_result is not None and getattr(run_result, "aborted", False):
+        return 1
+    return 0
+
+
+def _run_branch_review(*, repo_root: Path, config_path: Any, payload: dict[str, Any]) -> int:
+    """Dispatch a ``push`` event into a branch (no-PR) review."""
+    push_event = parse_push_event(payload)
+    if not should_review_push(push_event):
+        logging.getLogger("coco_pr_review").info(
+            "skipping push: %s is the default branch or not a branch head", push_event.ref
+        )
+        return 0
+
+    config = load_config(config_path)
+    logging.getLogger("coco_pr_review").info(
+        "effort profile: %s (config default)", config.orchestration.profile
+    )
+
+    if not os.environ.get("SNOWFLAKE_ACCOUNT") or not os.environ.get("SNOWFLAKE_HOST"):
+        print("SNOWFLAKE_ACCOUNT and SNOWFLAKE_HOST must be set for the review runtime")
+        return 1
+
+    reviewers, verifier, orchestrator, budget, progress, conventions_text = (
+        _build_review_runtime(repo_root, config)
+    )
+    github = Github(auth=Auth.Token(os.environ["GITHUB_TOKEN"]))
+    bot_login = os.environ.get("COCO_BOT_LOGIN", DEFAULT_BOT_LOGIN)
+    # Base ref defaults to the repo's default branch; an env override lets a
+    # consumer review against a different baseline without a config-schema change.
+    base_ref = os.environ.get("COCO_PR_REVIEW_BASE_REF") or push_event.default_branch
+
+    publisher = CommitPublisher(
+        github=github,
+        repo_full_name=push_event.repo_full_name,
+        head_sha=push_event.head_sha,
+        sanitize_fn=redact,
+        bot_login=bot_login,
+    )
+    result = asyncio.run(
+        run_branch_event(
+            repo_root=repo_root,
+            config=config,
+            reviewers=reviewers,
+            verifier=verifier,
+            orchestrator=orchestrator,
+            publisher=publisher,
+            budget=budget,
+            progress=progress,
+            sanitize_fn=redact,
+            push_event=push_event,
+            github=github,
+            base_ref=base_ref,
+            bot_login=bot_login,
+            conventions_text=conventions_text,
+        )
+    )
+    return _finish_result(result)
+
+
+def main() -> int:
+    """CLI entrypoint for GitHub Actions event dispatch."""
+    logging.basicConfig(
+        level=os.environ.get("COCO_PR_REVIEW_LOG_LEVEL", "INFO").upper(),
+        stream=sys.stdout,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
+    repo_root = Path(os.environ.get("GITHUB_WORKSPACE", Path.cwd())).resolve()
+    config_path = find_config(repo_root)
+
+    event_name, event_path = resolve_event_context()
+
+    # Load the payload once, then dispatch by event kind. A `push` event is a
+    # branch (no-PR) review, handled before `parse_github_event` (which only
+    # understands pull_request/issue_comment). A `@coco-review cheap|high`
+    # comment can override the effort profile, so the event is parsed before
+    # config is loaded.
+    try:
+        payload = load_event_payload(event_path)
+        if event_name == "push":
+            return _run_branch_review(
+                repo_root=repo_root, config_path=config_path, payload=payload
+            )
+        event = parse_github_event(
+            event_name=event_name, payload=payload, event_path=event_path
+        )
+    except UnsupportedGitHubEventError as exc:
+        print(str(exc))
+        return 1
+
+    profile_override = (
+        parse_review_command(event.comment_body)
+        if isinstance(event, IssueCommentEvent)
+        else None
+    )
+    config = load_config(config_path, profile=profile_override)
+    logging.getLogger("coco_pr_review").info(
+        "effort profile: %s%s",
+        config.orchestration.profile,
+        " (from @coco-review comment)" if profile_override else " (config default)",
+    )
+
+    if not os.environ.get("SNOWFLAKE_ACCOUNT") or not os.environ.get("SNOWFLAKE_HOST"):
+        print("SNOWFLAKE_ACCOUNT and SNOWFLAKE_HOST must be set for the review runtime")
+        return 1
+
+    reviewers, verifier, orchestrator, budget, progress, conventions_text = (
+        _build_review_runtime(repo_root, config)
+    )
+    github = Github(auth=Auth.Token(os.environ["GITHUB_TOKEN"]))
 
     try:
         bot_login = os.environ.get("COCO_BOT_LOGIN", DEFAULT_BOT_LOGIN)
@@ -376,25 +592,4 @@ def main() -> int:
         print(str(exc))
         return 1
 
-    if not isinstance(result, ReviewRunResult):
-        return 1
-
-    run_result = result.run_result
-    if run_result is not None:
-        logging.getLogger("coco_pr_review").info(
-            "review finished: status=%s candidates=%s deduped=%s verified=%s "
-            "cost_usd=%s aborted=%s reason=%s",
-            result.status,
-            getattr(run_result, "candidate_count", None),
-            getattr(run_result, "deduped_count", None),
-            len(getattr(run_result, "findings", []) or []),
-            getattr(run_result, "total_cost_usd", None),
-            getattr(run_result, "aborted", None),
-            getattr(run_result, "abort_reason", None),
-        )
-    else:
-        logging.getLogger("coco_pr_review").info("review finished: status=%s (no run_result)", result.status)
-
-    if run_result is not None and getattr(run_result, "aborted", False):
-        return 1
-    return 0
+    return _finish_result(result)

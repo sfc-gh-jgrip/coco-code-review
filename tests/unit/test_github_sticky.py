@@ -480,3 +480,54 @@ def test_render_sticky_unverified_disclaims_clean_review_and_names_count() -> No
     assert "re-run" in body.lower()
     # Names the most likely cause so the operator can act.
     assert "tree" in body.lower() or "commit" in body.lower()
+
+
+# ---------------------------------------------------------------------------
+# choose_sticky_body (shared WS-A guard for PR + branch publishers)
+# ---------------------------------------------------------------------------
+
+
+def _run_result(*, findings, deduped_count=0):
+    rr = MagicMock()
+    rr.findings = findings
+    rr.deduped_count = deduped_count
+    rr.reviewer_failures = 0
+    rr.stats = None
+    return rr
+
+
+def test_choose_sticky_body_diagnoses_unverified_candidates() -> None:
+    """Candidates survived dedupe but none verified -> honest diagnostic, not '0 findings'."""
+    from coco_pr_review.github.sticky import choose_sticky_body
+
+    body = choose_sticky_body(_run_result(findings=[], deduped_count=4))
+
+    assert "could not be verified" in body or "none could be verified" in body
+    assert "re-run" in body.lower()
+
+
+def test_choose_sticky_body_final_for_genuinely_clean_run() -> None:
+    """No findings AND no surviving candidates -> a real clean summary, not the diagnostic."""
+    from coco_pr_review.github.sticky import choose_sticky_body
+
+    body = choose_sticky_body(_run_result(findings=[], deduped_count=0))
+
+    assert "Review complete" in body
+    assert "could not be verified" not in body
+
+
+def test_choose_sticky_body_final_when_findings_present() -> None:
+    from coco_pr_review.github.sticky import choose_sticky_body
+
+    finding = MagicMock()
+    finding.severity = "blocker"
+    finding.pre_existing = False
+    finding.title = "Bug"
+    finding.file = "a.py"
+    finding.start_line = 3
+    finding.category = "correctness"
+
+    body = choose_sticky_body(_run_result(findings=[finding], deduped_count=1), posted=1)
+
+    assert "Review complete" in body
+    assert "Bug" in body
