@@ -1,15 +1,15 @@
-name: coco-branch-review-smoke
+name: coco-branch-review-on-demand
 
-# On-demand smoke test for branch (no-PR) review mode. Builds a synthetic
+# On-demand review of a branch that has no pull request. Builds a synthetic
 # `push` event and drives `python -m coco_pr_review` against a real branch head,
-# posting the review as a commit comment + check run. This is the WS-C live
-# harness: it is workflow_dispatch only, so it never double-reviews PRs.
+# posting the review as a commit comment + check run. It is workflow_dispatch
+# only (run from the Actions tab), so it never double-reviews PR branches.
 
 on:
   workflow_dispatch:
     inputs:
       repository:
-        description: Repository that owns the fixture branch, for example owner/repo
+        description: Repository that owns the branch to review, for example owner/repo
         required: true
         type: string
       branch:
@@ -33,11 +33,11 @@ permissions:
   id-token: write
 
 jobs:
-  smoke:
+  review:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check out fixture branch head
+      - name: Check out branch head
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.repository }}
@@ -83,28 +83,28 @@ jobs:
 
       - name: Write synthetic push event
         env:
-          SMOKE_REPOSITORY: ${{ inputs.repository }}
-          SMOKE_BRANCH: ${{ inputs.branch }}
-          SMOKE_HEAD_SHA: ${{ inputs.head_sha }}
-          SMOKE_BASE_REF: ${{ inputs.base_ref }}
+          INPUT_REPOSITORY: ${{ inputs.repository }}
+          INPUT_BRANCH: ${{ inputs.branch }}
+          INPUT_HEAD_SHA: ${{ inputs.head_sha }}
+          INPUT_BASE_REF: ${{ inputs.base_ref }}
         run: |
           python - <<'PY'
           import json
           import os
           from pathlib import Path
 
-          event_path = Path(os.environ["RUNNER_TEMP"]) / "coco-branch-review-smoke-event.json"
+          event_path = Path(os.environ["RUNNER_TEMP"]) / "coco-branch-review-event.json"
           payload = {
-              "ref": f"refs/heads/{os.environ['SMOKE_BRANCH']}",
-              "after": os.environ["SMOKE_HEAD_SHA"],
+              "ref": f"refs/heads/{os.environ['INPUT_BRANCH']}",
+              "after": os.environ["INPUT_HEAD_SHA"],
               "repository": {
-                  "full_name": os.environ["SMOKE_REPOSITORY"],
-                  "default_branch": os.environ["SMOKE_BASE_REF"],
+                  "full_name": os.environ["INPUT_REPOSITORY"],
+                  "default_branch": os.environ["INPUT_BASE_REF"],
               },
           }
           event_path.write_text(json.dumps(payload), encoding="utf-8")
           with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as env_file:
-              env_file.write(f"SMOKE_EVENT_PATH={event_path}\n")
+              env_file.write(f"COCO_EVENT_PATH={event_path}\n")
           PY
 
       - name: Authenticate to Snowflake via GitHub OIDC
@@ -116,12 +116,12 @@ jobs:
           role: ${{ vars.SNOWFLAKE_ROLE }}
           warehouse: ${{ vars.SNOWFLAKE_WAREHOUSE }}
 
-      - name: Run Coco branch review smoke test
+      - name: Run Coco branch review
         working-directory: ${{ github.workspace }}/coco-pr-review
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COCO_PR_REVIEW_EVENT_NAME: push
-          COCO_PR_REVIEW_EVENT_PATH: ${{ env.SMOKE_EVENT_PATH }}
+          COCO_PR_REVIEW_EVENT_PATH: ${{ env.COCO_EVENT_PATH }}
           COCO_PR_REVIEW_BASE_REF: ${{ inputs.base_ref }}
           GITHUB_REPOSITORY: ${{ inputs.repository }}
           GITHUB_WORKSPACE: ${{ github.workspace }}
