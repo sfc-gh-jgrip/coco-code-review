@@ -111,8 +111,19 @@ action exposes the same logic for workflows that wire up the steps themselves.
 Adoption is a single step. The composite action installs Cortex Code, mints the
 GitHub OIDC token, writes the Snowflake `connections.toml`, and runs the reviewer.
 
-1. Provision the Snowflake side in your account with `setup/snowflake_setup.sql`, using your
-   own user/role/warehouse names and your repo's OIDC subject.
+1. Provision the Snowflake side however you normally manage your account. The reviewer
+   authenticates from GitHub Actions via GitHub OIDC + Workload Identity Federation (no
+   long-lived secrets), so it needs:
+   - A **service user** (`TYPE = SERVICE`) with `WORKLOAD_IDENTITY` of `TYPE = OIDC`,
+     `ISSUER = https://token.actions.githubusercontent.com`, and `SUBJECT` matching your
+     repo's OIDC `sub` claim (e.g. `repo:<owner>/<repo>` — pin it stable across triggers
+     by customizing the repo's OIDC subject claim).
+   - A **role** for that user granted `SNOWFLAKE.CORTEX_USER` and `USAGE` on a **warehouse**.
+   - If your account enforces a network policy, a **user-scoped policy** that allows GitHub
+     Actions egress (the managed rule `SNOWFLAKE.NETWORK_SECURITY.GITHUBACTIONS_GLOBAL` covers this).
+
+   A copy-paste example with placeholders lives in
+   [`setup/snowflake_setup.sql`](setup/snowflake_setup.sql).
 2. Set the repository variables above and grant `id-token: write` permission.
 3. Add a workflow that checks out the repo and calls the action:
 
