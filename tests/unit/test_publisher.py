@@ -48,6 +48,9 @@ def _make_run_result(findings: list, *, candidate_count: int = 0, deduped_count:
     rr.findings = findings
     rr.candidate_count = candidate_count
     rr.deduped_count = deduped_count
+    # Real RunResult carries a PipelineStats or None; a bare MagicMock here would
+    # be truthy and unordered, so pin it to None unless a test sets it explicitly.
+    rr.stats = None
     return rr
 
 

@@ -280,27 +280,54 @@ def render_sticky_unverified(*, candidate_count: int, stats: Any = None) -> str:
     return "\n".join(lines)
 
 
+def _only_low_confidence_drops(stats: Any) -> bool:
+    """True when the only reason candidates didn't verify is low confidence.
+
+    A low-confidence-only outcome is the verifier working as designed: it saw
+    real candidates but none cleared the confidence threshold, so nothing is
+    surfaced. That is a (cautious) clean result, NOT the "couldn't confirm the
+    findings against the tree" situation the unverified diagnostic warns about.
+    """
+    couldnt_confirm = (
+        stats.dropped_evidence_mismatch
+        + stats.dropped_not_in_pr
+        + stats.dropped_verifier_error
+        + stats.dropped_unparseable
+    )
+    return stats.dropped_low_confidence > 0 and couldnt_confirm == 0
+
+
 def choose_sticky_body(run_result: Any, *, posted: int = 0, skipped: int = 0) -> str:
-    """Pick the right sticky body for a completed run (the WS-A diagnostic guard).
+    """Pick the right sticky body for a completed run.
 
     Single source of truth shared by the PR publisher and the branch (commit)
-    publisher: when candidates survived dedupe but *none* verified, post the
-    honest "could not verify" diagnostic instead of a misleading "0 findings"
-    (which would also clobber a prior good sticky). Otherwise render the final
-    summary. ``posted``/``skipped`` are inline-comment counts (always 0 for the
-    branch path, which posts no inline comments).
+    publisher. When candidates survived dedupe but *none* verified, the cause
+    matters:
+
+    - If the verifier could not confirm the candidates against the source
+      (evidence mismatch, out-of-diff, verifier error, unparseable output), post
+      the honest "could not verify" diagnostic. This is the wrong-tree guard: a
+      misleading "0 findings" here would also clobber a prior good sticky.
+    - If candidates were dropped *only* for low confidence, the review ran fine
+      and simply found nothing confident enough to report — render the normal
+      final summary (the funnel still discloses the discarded candidates).
+
+    ``posted``/``skipped`` are inline-comment counts (always 0 for the branch
+    path, which posts no inline comments).
     """
+    stats = getattr(run_result, "stats", None)
     if not run_result.findings and getattr(run_result, "deduped_count", 0):
-        return render_sticky_unverified(
-            candidate_count=run_result.deduped_count,
-            stats=getattr(run_result, "stats", None),
-        )
+        if stats is None or not _only_low_confidence_drops(stats):
+            return render_sticky_unverified(
+                candidate_count=run_result.deduped_count,
+                stats=stats,
+            )
     return render_sticky_final(
         findings=run_result.findings,
         posted=posted,
         skipped=skipped,
         reviewer_failures=getattr(run_result, "reviewer_failures", 0) or 0,
-        stats=getattr(run_result, "stats", None),
+        stats=stats,
     )
 
 
