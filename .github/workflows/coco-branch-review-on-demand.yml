@@ -1,0 +1,141 @@
+name: coco-branch-review-on-demand
+
+# On-demand review of a branch that has no pull request. Builds a synthetic
+# `push` event and drives `python -m coco_pr_review` against a real branch head,
+# posting the review as a commit comment + check run. It is workflow_dispatch
+# only (run from the Actions tab), so it never double-reviews PR branches.
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: Repository that owns the branch to review, for example owner/repo
+        required: true
+        type: string
+      branch:
+        description: Feature branch name to review (without refs/heads/)
+        required: true
+        type: string
+      head_sha:
+        description: Branch head SHA to review
+        required: true
+        type: string
+      base_ref:
+        description: Base ref to diff against (default branch)
+        required: false
+        default: main
+        type: string
+
+permissions:
+  contents: read
+  issues: write
+  checks: write
+  id-token: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out branch head
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repository }}
+          fetch-depth: 0
+          ref: ${{ inputs.head_sha }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Make the base ref available for the merge-base diff
+        env:
+          BASE_REF: ${{ inputs.base_ref }}
+        run: |
+          # `git diff base...head` needs a local ref named <base_ref>. Fetch it
+          # from origin (idempotent: ignore failure if it already resolves).
+          git fetch origin "${BASE_REF}:${BASE_REF}" || git rev-parse "${BASE_REF}"
+
+      - name: Check out reviewer workflow repository
+        uses: actions/checkout@v4
+        with:
+          path: coco-pr-review
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: coco-pr-review/pyproject.toml
+
+      - name: Install Cortex Code
+        run: |
+          curl -fsSL https://ai.snowflake.com/static/cc-scripts/install.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Verify Cortex Code
+        run: |
+          which cortex
+          cortex --help
+
+      - name: Install package
+        working-directory: coco-pr-review
+        run: |
+          python -m pip install --upgrade pip
+          pip install .
+
+      - name: Write synthetic push event
+        env:
+          INPUT_REPOSITORY: ${{ inputs.repository }}
+          INPUT_BRANCH: ${{ inputs.branch }}
+          INPUT_HEAD_SHA: ${{ inputs.head_sha }}
+          INPUT_BASE_REF: ${{ inputs.base_ref }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          event_path = Path(os.environ["RUNNER_TEMP"]) / "coco-branch-review-event.json"
+          payload = {
+              "ref": f"refs/heads/{os.environ['INPUT_BRANCH']}",
+              "after": os.environ["INPUT_HEAD_SHA"],
+              "repository": {
+                  "full_name": os.environ["INPUT_REPOSITORY"],
+                  "default_branch": os.environ["INPUT_BASE_REF"],
+              },
+          }
+          event_path.write_text(json.dumps(payload), encoding="utf-8")
+          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as env_file:
+              env_file.write(f"COCO_EVENT_PATH={event_path}\n")
+          PY
+
+      - name: Authenticate to Snowflake via GitHub OIDC
+        uses: ./coco-pr-review/.github/actions/snowflake-oidc
+        with:
+          account: ${{ vars.SNOWFLAKE_ACCOUNT }}
+          host: ${{ vars.SNOWFLAKE_HOST }}
+          user: ${{ vars.SNOWFLAKE_USER }}
+          role: ${{ vars.SNOWFLAKE_ROLE }}
+          warehouse: ${{ vars.SNOWFLAKE_WAREHOUSE }}
+
+      - name: Run Coco branch review
+        working-directory: ${{ github.workspace }}/coco-pr-review
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COCO_PR_REVIEW_EVENT_NAME: push
+          COCO_PR_REVIEW_EVENT_PATH: ${{ env.COCO_EVENT_PATH }}
+          COCO_PR_REVIEW_BASE_REF: ${{ inputs.base_ref }}
+          GITHUB_REPOSITORY: ${{ inputs.repository }}
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+          SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_HOST: ${{ vars.SNOWFLAKE_HOST }}
+          SNOWFLAKE_DEFAULT_CONNECTION_NAME: default
+        run: python -m coco_pr_review
+
+      - name: Dump Cortex Code logs
+        if: failure()
+        run: |
+          echo "=== cortex logs path ==="
+          cortex logs path || true
+          echo "=== cortex logs errors ==="
+          cortex logs errors -n 200 --all-rotations || true
+          echo "=== cortex logs tail ==="
+          cortex logs tail || true

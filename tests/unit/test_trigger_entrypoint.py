@@ -335,3 +335,169 @@ def test_parse_review_command_bare_or_unknown_returns_none() -> None:
     assert parse_review_command("@coco-review turbo") is None
     assert parse_review_command("no mention here") is None
     assert parse_review_command("@coco-review\nthanks") is None
+
+
+# ---------------------------------------------------------------------------
+# Push (branch / no-PR) trigger
+# ---------------------------------------------------------------------------
+
+
+def _push_payload(*, ref="refs/heads/feature", after="e" * 40, default_branch="main"):
+    return {
+        "ref": ref,
+        "after": after,
+        "repository": {"full_name": "owner/repo", "default_branch": default_branch},
+    }
+
+
+def test_parse_push_event_extracts_branch_identity() -> None:
+    from coco_pr_review.github_event import PushEvent, parse_push_event
+
+    event = parse_push_event(_push_payload())
+
+    assert event == PushEvent(
+        repo_full_name="owner/repo",
+        head_sha="e" * 40,
+        ref="refs/heads/feature",
+        default_branch="main",
+    )
+
+
+def test_parse_push_event_rejects_incomplete_payload() -> None:
+    from coco_pr_review.github_event import UnsupportedGitHubEventError, parse_push_event
+
+    with pytest.raises(UnsupportedGitHubEventError):
+        parse_push_event({"ref": "refs/heads/feature"})  # missing repository/after
+
+
+def test_should_review_push_reviews_non_default_branch_head() -> None:
+    from coco_pr_review.github_event import parse_push_event, should_review_push
+
+    assert should_review_push(parse_push_event(_push_payload(ref="refs/heads/feature"))) is True
+
+
+def test_should_review_push_skips_default_branch() -> None:
+    from coco_pr_review.github_event import parse_push_event, should_review_push
+
+    payload = _push_payload(ref="refs/heads/main", default_branch="main")
+    assert should_review_push(parse_push_event(payload)) is False
+
+
+def test_should_review_push_skips_non_branch_ref() -> None:
+    from coco_pr_review.github_event import parse_push_event, should_review_push
+
+    payload = _push_payload(ref="refs/tags/v1.0")
+    assert should_review_push(parse_push_event(payload)) is False
+
+
+def test_should_review_push_skips_branch_deletion() -> None:
+    from coco_pr_review.github_event import parse_push_event, should_review_push
+
+    payload = _push_payload(after="0" * 40)
+    assert should_review_push(parse_push_event(payload)) is False
+
+
+@pytest.mark.asyncio
+async def test_run_branch_event_dispatches_branch_source_with_force_review_true() -> None:
+    from coco_pr_review.github.branch_source import BranchReviewSource
+    from coco_pr_review.github_event import PushEvent, run_branch_event
+    from coco_pr_review.orchestration.base import ChangedFile
+
+    push_event = PushEvent(
+        repo_full_name="owner/repo", head_sha="e" * 40, ref="refs/heads/feature", default_branch="main"
+    )
+    github = MagicMock()
+    changed = [ChangedFile(path="f.py", line_ranges=[(1, 2)], patch="@@ -0,0 +1,2 @@\n+a\n+b\n")]
+    run_review = AsyncMock(return_value="ok")
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(
+            "coco_pr_review.github_event.changed_files_from_git",
+            lambda *, base_ref, repo_root, head: (changed, "UNIFIED"),
+        )
+        monkeypatch.setattr("coco_pr_review.github_event.run_review", run_review)
+        result = await run_branch_event(
+            repo_root=Path("/tmp/repo"),
+            config=MagicMock(),
+            reviewers=[],
+            verifier=MagicMock(),
+            orchestrator=MagicMock(),
+            publisher=MagicMock(),
+            budget=MagicMock(),
+            progress=MagicMock(),
+            sanitize_fn=lambda body: body,
+            push_event=push_event,
+            github=github,
+            base_ref="main",
+        )
+
+    assert result == "ok"
+    kwargs = run_review.await_args.kwargs
+    assert kwargs["force_review"] is True
+    assert kwargs["unified_diff"] == "UNIFIED"
+    source = kwargs["github_client"]
+    assert isinstance(source, BranchReviewSource)
+    assert source.repo_full_name == "owner/repo"
+    assert source.head_sha == "e" * 40
+    assert source.changed_files == changed
+
+
+def test_run_branch_event_uses_base_ref_env_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_run_branch_review honours COCO_PR_REVIEW_BASE_REF over the push default branch."""
+    from coco_pr_review import github_event
+
+    captured: dict[str, object] = {}
+
+    async def _fake_run_branch_event(**kwargs):
+        captured.update(kwargs)
+        return _make_review_run_result(status="reviewed")
+
+    monkeypatch.setenv("COCO_PR_REVIEW_BASE_REF", "release-2.0")
+    monkeypatch.setenv("GITHUB_TOKEN", "token")
+    monkeypatch.setenv("SNOWFLAKE_ACCOUNT", "acct")
+    monkeypatch.setenv("SNOWFLAKE_HOST", "acct.snowflakecomputing.com")
+    monkeypatch.setattr(github_event, "load_config", lambda path, profile=None: MagicMock(limits=MagicMock(max_usd_per_pr=1)))
+    monkeypatch.setattr(github_event, "_build_review_runtime", lambda repo_root, config: ([], MagicMock(), MagicMock(), MagicMock(), MagicMock(), None))
+    monkeypatch.setattr(github_event, "Github", lambda auth: MagicMock())
+    monkeypatch.setattr(github_event, "CommitPublisher", lambda **kw: MagicMock())
+    monkeypatch.setattr(github_event, "run_branch_event", _fake_run_branch_event)
+
+    rc = github_event._run_branch_review(
+        repo_root=Path("/tmp/repo"), config_path=Path("/tmp/coco.toml"), payload=_push_payload()
+    )
+
+    assert rc == 0
+    assert captured["base_ref"] == "release-2.0"
+
+
+def test_run_branch_review_skips_default_branch_without_running() -> None:
+    from coco_pr_review import github_event
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        load_config = MagicMock()
+        monkeypatch.setattr(github_event, "load_config", load_config)
+        rc = github_event._run_branch_review(
+            repo_root=Path("/tmp/repo"),
+            config_path=Path("/tmp/coco.toml"),
+            payload=_push_payload(ref="refs/heads/main", default_branch="main"),
+        )
+
+    assert rc == 0
+    load_config.assert_not_called()
+
+
+def test_main_routes_push_event_to_branch_review() -> None:
+    from coco_pr_review import github_event
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setenv("GITHUB_WORKSPACE", "/tmp/repo")
+        monkeypatch.setenv("GITHUB_EVENT_NAME", "push")
+        monkeypatch.delenv("COCO_PR_REVIEW_EVENT_NAME", raising=False)
+        monkeypatch.setattr(github_event, "find_config", lambda repo_root: Path("/tmp/coco.toml"))
+        monkeypatch.setattr(github_event, "load_event_payload", lambda event_path=None: _push_payload())
+        branch_review = MagicMock(return_value=0)
+        monkeypatch.setattr(github_event, "_run_branch_review", branch_review)
+
+        assert github_event.main() == 0
+        branch_review.assert_called_once()
+        assert branch_review.call_args.kwargs["payload"] == _push_payload()

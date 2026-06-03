@@ -480,3 +480,118 @@ def test_render_sticky_unverified_disclaims_clean_review_and_names_count() -> No
     assert "re-run" in body.lower()
     # Names the most likely cause so the operator can act.
     assert "tree" in body.lower() or "commit" in body.lower()
+
+
+# ---------------------------------------------------------------------------
+# choose_sticky_body (shared WS-A guard for PR + branch publishers)
+# ---------------------------------------------------------------------------
+
+
+def _run_result(*, findings, deduped_count=0, stats=None):
+    rr = MagicMock()
+    rr.findings = findings
+    rr.deduped_count = deduped_count
+    rr.reviewer_failures = 0
+    rr.stats = stats
+    return rr
+
+
+def _stats(
+    *,
+    low_confidence=0,
+    evidence_mismatch=0,
+    not_in_pr=0,
+    verifier_error=0,
+    unparseable=0,
+    deduped=0,
+):
+    """A real PipelineStats with the given drop breakdown (verified=0)."""
+    from coco_pr_review.orchestration.base import PipelineStats
+
+    return PipelineStats(
+        reviewer_names=["bugs-and-security"],
+        replicas_dispatched=1,
+        replicas_succeeded=1,
+        replicas_failed=0,
+        raw_candidates=deduped,
+        deduped_candidates=deduped,
+        verified=0,
+        dropped_verifier_error=verifier_error,
+        dropped_unparseable=unparseable,
+        dropped_low_confidence=low_confidence,
+        dropped_evidence_mismatch=evidence_mismatch,
+        dropped_not_in_pr=not_in_pr,
+        confidence_threshold=80,
+    )
+
+
+def test_choose_sticky_body_diagnoses_unverified_candidates() -> None:
+    """Candidates survived dedupe but none verified -> honest diagnostic, not '0 findings'."""
+    from coco_pr_review.github.sticky import choose_sticky_body
+
+    body = choose_sticky_body(_run_result(findings=[], deduped_count=4))
+
+    assert "could not be verified" in body or "none could be verified" in body
+    assert "re-run" in body.lower()
+
+
+def test_choose_sticky_body_diagnoses_when_evidence_could_not_be_confirmed() -> None:
+    """Drops from evidence mismatch (a wrong-tree fingerprint) keep the diagnostic."""
+    from coco_pr_review.github.sticky import choose_sticky_body
+
+    stats = _stats(deduped=2, evidence_mismatch=2)
+    body = choose_sticky_body(_run_result(findings=[], deduped_count=2, stats=stats))
+
+    assert "could not be verified" in body or "none could be verified" in body
+    assert "re-run" in body.lower()
+
+
+def test_choose_sticky_body_treats_low_confidence_only_as_clean() -> None:
+    """Candidates dropped *only* for low confidence is a clean run, NOT a wrong-tree alarm."""
+    from coco_pr_review.github.sticky import choose_sticky_body
+
+    stats = _stats(deduped=2, low_confidence=2)
+    body = choose_sticky_body(_run_result(findings=[], deduped_count=2, stats=stats))
+
+    assert "Review complete" in body
+    assert "could not be verified" not in body
+    assert "wrong source tree" not in body
+    # The funnel still discloses the discarded candidates.
+    assert "low confidence 2" in body
+
+
+def test_choose_sticky_body_diagnoses_mixed_low_confidence_and_unconfirmable() -> None:
+    """A mix of low-confidence AND can't-confirm drops still warrants the diagnostic."""
+    from coco_pr_review.github.sticky import choose_sticky_body
+
+    stats = _stats(deduped=2, low_confidence=1, verifier_error=1)
+    body = choose_sticky_body(_run_result(findings=[], deduped_count=2, stats=stats))
+
+    assert "could not be verified" in body or "none could be verified" in body
+
+
+def test_choose_sticky_body_final_for_genuinely_clean_run() -> None:
+    """No findings AND no surviving candidates -> a real clean summary, not the diagnostic."""
+    from coco_pr_review.github.sticky import choose_sticky_body
+
+    body = choose_sticky_body(_run_result(findings=[], deduped_count=0))
+
+    assert "Review complete" in body
+    assert "could not be verified" not in body
+
+
+def test_choose_sticky_body_final_when_findings_present() -> None:
+    from coco_pr_review.github.sticky import choose_sticky_body
+
+    finding = MagicMock()
+    finding.severity = "blocker"
+    finding.pre_existing = False
+    finding.title = "Bug"
+    finding.file = "a.py"
+    finding.start_line = 3
+    finding.category = "correctness"
+
+    body = choose_sticky_body(_run_result(findings=[finding], deduped_count=1), posted=1)
+
+    assert "Review complete" in body
+    assert "Bug" in body
