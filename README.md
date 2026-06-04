@@ -218,7 +218,7 @@ pip install -e .[dev]
 Run tests:
 
 ```bash
-python -m pytest /Users/jgrip/dev/coco-apps/coco-code-review -q
+python -m pytest -q
 ```
 
 ## Testing
