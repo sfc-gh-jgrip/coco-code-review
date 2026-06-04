@@ -173,6 +173,76 @@ GitHub OIDC token, writes the Snowflake `connections.toml`, and runs the reviewe
 > release like `@v1.2.0`. Each merge to `main` cuts a new minor release and moves
 > `v1` forward.
 
+### Review modes and configuration
+
+The reviewer works with **zero config**. To tune it, drop a `.coco-pr-review.yml`
+at the root of the repo being reviewed; every key is optional and layers on top of
+the defaults.
+
+**Default behavior** (no config): the `high` profile runs the `bugs-and-security`
+and `performance-and-cost` reviewers (1 replica each) plus a verifier pass —
+`style-and-conventions` and `tests-coverage` are off. Budget ~30 min / $4 per PR.
+
+#### Profiles
+
+A profile is a named bundle of settings:
+
+| Profile | Reviewers (+ verifier) | Budget |
+|---------|------------------------|--------|
+| `high` (default) | `bugs-and-security` + `performance-and-cost` | 30 min / $4 |
+| `cheap` | `bugs-and-security` | 10 min / $1 |
+
+Set it per-repo:
+
+```yaml
+orchestration:
+  profile: cheap
+```
+
+…or override it per-PR by commenting on the pull request:
+
+```
+@coco-review cheap
+@coco-review high
+```
+
+A bare `@coco-review` (or any unrecognized word) re-runs with the repo's default profile.
+
+#### Reviewers
+
+Four bundled lenses. Enable/disable them, add replicas, or append your own guidance:
+
+```yaml
+reviewers:
+  - name: tests-coverage
+    enabled: true
+  - name: bugs-and-security
+    replicas: 2
+    prompt_extra: "Also flag architectural smells: leaky module boundaries, cyclic deps, god objects."
+```
+
+Available names: `bugs-and-security`, `performance-and-cost`, `style-and-conventions`,
+`tests-coverage`. `prompt_extra` appends instructions to that lens — it's the way to
+steer a review toward something specific (e.g. architecture). You can't register a
+brand-new named reviewer via config; that requires adding an agent prompt to the package.
+
+#### Other knobs (with defaults)
+
+```yaml
+verifier:
+  enabled: true
+  confidence_threshold: 80     # drop findings the verifier scores below this
+limits:
+  max_usd_per_pr: 2.00         # profiles raise/lower this
+  job_timeout_sec: 600
+  max_findings_per_reviewer: 20
+max_diff_lines: 2000           # skip review when the diff is larger
+paths_ignore: []               # globs to exclude, e.g. ["dist/**", "*.lock"]
+review_bot_prs: false          # also review PRs opened by bots
+sanitize:
+  enabled: true                # redact secret-like strings from prompts/output
+```
+
 What not to do:
 
 - Do not commit auth files or generated connection artifacts to the repo.
