@@ -138,7 +138,7 @@ GitHub OIDC token, writes the Snowflake `connections.toml`, and runs the reviewe
      - uses: actions/checkout@v4
        with:
          fetch-depth: 0
-     - uses: sfc-gh-jgrip/coco-code-review@main
+      - uses: sfc-gh-jgrip/coco-code-review@v1
        with:
          snowflake-account: ${{ vars.SNOWFLAKE_ACCOUNT }}
          snowflake-host: ${{ vars.SNOWFLAKE_HOST }}
@@ -169,8 +169,9 @@ GitHub OIDC token, writes the Snowflake `connections.toml`, and runs the reviewe
 | `log-level` | no | — | Reviewer log level (`DEBUG`, `INFO`, ...). |
 | `base-ref` | no | — | Diff base override for branch (push) reviews. |
 
-> **Versioning:** pin to a tagged release once releases are published. Tagged
-> releases and version pinning are not yet set up — for now reference `@main`.
+> **Versioning:** pin to the moving major tag `@v1` (recommended) or a specific
+> release like `@v1.2.0`. Each merge to `main` cuts a new minor release and moves
+> `v1` forward.
 
 What not to do:
 
@@ -190,7 +191,7 @@ pip install -e .[dev]
 Run tests:
 
 ```bash
-python -m pytest /Users/jgrip/dev/coco-apps/coco-code-review -q
+python -m pytest -q
 ```
 
 ## Testing
