@@ -99,35 +99,78 @@ can assume the identity, which is acceptable for this low-privilege reviewer use
 
 ### How authentication works at runtime
 
-Both workflows call the reusable composite action [`.github/actions/snowflake-oidc`](.github/actions/snowflake-oidc/action.yml),
-which mints the GitHub OIDC token (audience `snowflakecomputing.com`) and writes a
-Cortex-readable `~/.snowflake/connections.toml` using `authenticator = WORKLOAD_IDENTITY`.
-The Cortex Code CLI then authenticates with that token — no secret is persisted.
+The reviewer authenticates to Snowflake with a short-lived GitHub OIDC token
+(audience `snowflakecomputing.com`) written to a Cortex-readable
+`~/.snowflake/connections.toml` using `authenticator = WORKLOAD_IDENTITY` — no
+secret is persisted. The top-level composite action ([`action.yml`](action.yml))
+inlines this OIDC mint; the standalone [`.github/actions/snowflake-oidc`](.github/actions/snowflake-oidc/action.yml)
+action exposes the same logic for workflows that wire up the steps themselves.
 
 ### Reusing this reviewer in another repository
 
-1. Provision the Snowflake side in your account with `setup/snowflake_setup.sql`, using your
-   own user/role/warehouse names and your repo's OIDC subject.
-2. Set the five repository variables above (plus `id-token: write` permission).
-3. Reference the auth action and run the reviewer. You can either copy the workflow, or call
-   the composite action directly from your own workflow:
+Adoption is a single step. The composite action installs Cortex Code, mints the
+GitHub OIDC token, writes the Snowflake `connections.toml`, and runs the reviewer.
+
+1. Provision the Snowflake side however you normally manage your account. The reviewer
+   authenticates from GitHub Actions via GitHub OIDC + Workload Identity Federation (no
+   long-lived secrets), so it needs:
+   - A **service user** (`TYPE = SERVICE`) with `WORKLOAD_IDENTITY` of `TYPE = OIDC`,
+     `ISSUER = https://token.actions.githubusercontent.com`, and `SUBJECT` matching your
+     repo's OIDC `sub` claim (e.g. `repo:<owner>/<repo>` — pin it stable across triggers
+     by customizing the repo's OIDC subject claim).
+   - A **role** for that user granted `SNOWFLAKE.CORTEX_USER` and `USAGE` on a **warehouse**.
+   - If your account enforces a network policy, a **user-scoped policy** that allows GitHub
+     Actions egress (the managed rule `SNOWFLAKE.NETWORK_SECURITY.GITHUBACTIONS_GLOBAL` covers this).
+
+   A copy-paste example with placeholders lives in
+   [`setup/snowflake_setup.sql`](setup/snowflake_setup.sql).
+2. Set the repository variables above and grant `id-token: write` permission.
+3. Add a workflow that checks out the repo and calls the action:
 
    ```yaml
    permissions:
      id-token: write
      contents: read
      pull-requests: write
+     issues: write
+     checks: write
    steps:
      - uses: actions/checkout@v4
-     - uses: sfc-gh-jgrip/coco-code-review/.github/actions/snowflake-oidc@main
        with:
-         account: ${{ vars.SNOWFLAKE_ACCOUNT }}
-         host: ${{ vars.SNOWFLAKE_HOST }}
-         user: ${{ vars.SNOWFLAKE_USER }}
-         role: ${{ vars.SNOWFLAKE_ROLE }}
-         warehouse: ${{ vars.SNOWFLAKE_WAREHOUSE }}
-     # ... install the package and run `python -m coco_pr_review`
+         fetch-depth: 0
+     - uses: sfc-gh-jgrip/coco-code-review@main
+       with:
+         snowflake-account: ${{ vars.SNOWFLAKE_ACCOUNT }}
+         snowflake-host: ${{ vars.SNOWFLAKE_HOST }}
+         snowflake-user: ${{ vars.SNOWFLAKE_USER }}
+         snowflake-role: ${{ vars.SNOWFLAKE_ROLE }}
+         snowflake-warehouse: ${{ vars.SNOWFLAKE_WAREHOUSE }}
    ```
+
+   `fetch-depth: 0` is required so the diff has full history. For `issue_comment`
+   (`@coco-review`) triggers, resolve the PR head SHA and pass it to `checkout`'s
+   `ref:` — see [`.github/workflows/coco-pr-review.yml`](.github/workflows/coco-pr-review.yml)
+   for the full reference workflow this repo uses to review its own PRs.
+
+#### Action inputs
+
+| Input | Required | Default | Notes |
+|-------|----------|---------|-------|
+| `snowflake-account` | yes | — | Account identifier (e.g. `myorg-myaccount`). |
+| `snowflake-host` | yes | — | Account host (e.g. `abc12345.eu-central-1.snowflakecomputing.com`). |
+| `snowflake-user` | yes | — | Service user with `WORKLOAD_IDENTITY`. |
+| `snowflake-role` | yes | — | Role for the service user. |
+| `snowflake-warehouse` | yes | — | Warehouse for the service user. |
+| `github-token` | no | `${{ github.token }}` | API token; ignored when an App token is minted. |
+| `coco-app-id` | no | `''` | GitHub App ID; posts comments under the app identity. |
+| `coco-app-private-key` | no | `''` | App private key (PEM), paired with `coco-app-id`. |
+| `python-version` | no | `3.11` | Python used to install/run the reviewer. |
+| `oidc-audience` | no | `snowflakecomputing.com` | OIDC token audience. |
+| `log-level` | no | — | Reviewer log level (`DEBUG`, `INFO`, ...). |
+| `base-ref` | no | — | Diff base override for branch (push) reviews. |
+
+> **Versioning:** pin to a tagged release once releases are published. Tagged
+> releases and version pinning are not yet set up — for now reference `@main`.
 
 What not to do:
 

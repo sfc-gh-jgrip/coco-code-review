@@ -370,7 +370,11 @@ def _build_review_runtime(
     triggered the run, so both the PR/comment dispatch and the branch (push)
     dispatch construct it identically.
     """
-    reviewers_dir = repo_root / "src" / "coco_pr_review" / "agents"
+    # Load the bundled reviewer prompts from THIS package, not from repo_root
+    # (the consumer's checkout). A consumer repo using this as a GitHub Action
+    # won't contain src/coco_pr_review/agents/; the prompts ship inside the
+    # pip-installed package, so resolve them relative to this module.
+    reviewers_dir = Path(__file__).resolve().parent / "agents"
     reviewers = [
         parse_agent_md(reviewers_dir / "bugs-and-security.md"),
         parse_agent_md(reviewers_dir / "tests-coverage.md"),

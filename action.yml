@@ -1,0 +1,155 @@
+name: Coco PR Review
+description: >
+  Review pull requests (and branch pushes) with the Snowflake Cortex Code
+  Agent SDK. Installs Cortex Code, authenticates to Snowflake via GitHub OIDC
+  Workload Identity Federation (no long-lived secrets), and runs the reviewer.
+
+inputs:
+  snowflake-account:
+    description: Snowflake account identifier (e.g. myorg-myaccount).
+    required: true
+  snowflake-host:
+    description: >
+      Snowflake account host (e.g. abc12345.eu-central-1.snowflakecomputing.com).
+      Required by the reviewer at runtime.
+    required: true
+  snowflake-user:
+    description: Snowflake service user configured with WORKLOAD_IDENTITY.
+    required: true
+  snowflake-role:
+    description: Snowflake role for the service user.
+    required: true
+  snowflake-warehouse:
+    description: Snowflake warehouse for the service user.
+    required: true
+  github-token:
+    description: >
+      Token used for GitHub API calls. Falls back to the default workflow
+      token. Ignored when a GitHub App token is minted via coco-app-id.
+    required: false
+    default: ${{ github.token }}
+  coco-app-id:
+    description: >
+      GitHub App ID. When set, the action mints an app installation token and
+      posts review comments under the app identity instead of github-actions[bot].
+    required: false
+    default: ''
+  coco-app-private-key:
+    description: GitHub App private key (PEM), paired with coco-app-id.
+    required: false
+    default: ''
+  python-version:
+    description: Python version used to install and run the reviewer.
+    required: false
+    default: '3.11'
+  oidc-audience:
+    description: OIDC token audience expected by Snowflake.
+    required: false
+    default: snowflakecomputing.com
+  log-level:
+    description: Optional reviewer log level (DEBUG, INFO, WARNING, ...).
+    required: false
+    default: ''
+  base-ref:
+    description: Optional diff base ref override for branch (push) reviews.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install Cortex Code
+      shell: bash
+      run: |
+        set -euo pipefail
+        curl -fsSL https://ai.snowflake.com/static/cc-scripts/install.sh | bash
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+    - name: Verify Cortex Code
+      shell: bash
+      run: |
+        export PATH="$HOME/.local/bin:$PATH"
+        which cortex
+        cortex --help >/dev/null
+
+    - name: Install reviewer package
+      shell: bash
+      run: |
+        set -euo pipefail
+        python -m pip install --upgrade pip
+        # $GITHUB_ACTION_PATH is this action's own checkout, NOT the consumer repo.
+        pip install "$GITHUB_ACTION_PATH"
+
+    - name: Authenticate to Snowflake via GitHub OIDC
+      shell: bash
+      env:
+        SNOWFLAKE_ACCOUNT: ${{ inputs.snowflake-account }}
+        SNOWFLAKE_HOST: ${{ inputs.snowflake-host }}
+        SNOWFLAKE_USER: ${{ inputs.snowflake-user }}
+        SNOWFLAKE_ROLE: ${{ inputs.snowflake-role }}
+        SNOWFLAKE_WAREHOUSE: ${{ inputs.snowflake-warehouse }}
+        OIDC_AUDIENCE: ${{ inputs.oidc-audience }}
+      run: |
+        set -euo pipefail
+        if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+          echo "OIDC is not available. Ensure the job has 'permissions: id-token: write'." >&2
+          exit 1
+        fi
+        oidc_token="$(curl -sS \
+          -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+          "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$OIDC_AUDIENCE" \
+          | jq -r '.value')"
+        if [ -z "$oidc_token" ] || [ "$oidc_token" = "null" ]; then
+          echo "Failed to mint GitHub OIDC token" >&2
+          exit 1
+        fi
+        mkdir -p "$HOME/.snowflake"
+        cat > "$HOME/.snowflake/connections.toml" <<EOF
+        [default]
+        account = "$SNOWFLAKE_ACCOUNT"
+        host = "$SNOWFLAKE_HOST"
+        user = "$SNOWFLAKE_USER"
+        role = "$SNOWFLAKE_ROLE"
+        warehouse = "$SNOWFLAKE_WAREHOUSE"
+        authenticator = "WORKLOAD_IDENTITY"
+        workload_identity_provider = "OIDC"
+        token = "$oidc_token"
+        EOF
+        chmod 600 "$HOME/.snowflake/connections.toml"
+
+    - name: Mint Coco App token
+      id: app-token
+      if: inputs.coco-app-id != ''
+      uses: actions/create-github-app-token@v1
+      with:
+        app-id: ${{ inputs.coco-app-id }}
+        private-key: ${{ inputs.coco-app-private-key }}
+
+    - name: Run Coco PR review
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ steps.app-token.outputs.token || inputs.github-token }}
+        COCO_BOT_LOGIN: ${{ steps.app-token.outputs.app-slug && format('{0}[bot]', steps.app-token.outputs.app-slug) || 'github-actions[bot]' }}
+        SNOWFLAKE_ACCOUNT: ${{ inputs.snowflake-account }}
+        SNOWFLAKE_HOST: ${{ inputs.snowflake-host }}
+        SNOWFLAKE_DEFAULT_CONNECTION_NAME: default
+        INPUT_LOG_LEVEL: ${{ inputs.log-level }}
+        INPUT_BASE_REF: ${{ inputs.base-ref }}
+      run: |
+        export PATH="$HOME/.local/bin:$PATH"
+        # GITHUB_EVENT_NAME, GITHUB_EVENT_PATH, GITHUB_REPOSITORY and
+        # GITHUB_WORKSPACE are provided by the runner's default environment.
+        # Only export optional overrides when set: an empty COCO_PR_REVIEW_LOG_LEVEL
+        # would make logging.basicConfig(level="") raise.
+        if [ -n "$INPUT_LOG_LEVEL" ]; then
+          export COCO_PR_REVIEW_LOG_LEVEL="$INPUT_LOG_LEVEL"
+        fi
+        if [ -n "$INPUT_BASE_REF" ]; then
+          export COCO_PR_REVIEW_BASE_REF="$INPUT_BASE_REF"
+        fi
+        python -m coco_pr_review
