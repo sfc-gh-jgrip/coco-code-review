@@ -138,7 +138,7 @@ GitHub OIDC token, writes the Snowflake `connections.toml`, and runs the reviewe
      - uses: actions/checkout@v4
        with:
          fetch-depth: 0
-     - uses: sfc-gh-jgrip/coco-code-review@main
+      - uses: sfc-gh-jgrip/coco-code-review@v1
        with:
          snowflake-account: ${{ vars.SNOWFLAKE_ACCOUNT }}
          snowflake-host: ${{ vars.SNOWFLAKE_HOST }}
