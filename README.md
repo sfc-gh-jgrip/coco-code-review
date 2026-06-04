@@ -173,33 +173,6 @@ GitHub OIDC token, writes the Snowflake `connections.toml`, and runs the reviewe
 > release like `@v1.2.0`. Each merge to `main` cuts a new minor release and moves
 > `v1` forward.
 
-#### Optional: post reviews as your own GitHub App (name + logo)
-
-By default the reviewer comments as `github-actions[bot]`. To post under your own
-app's name and avatar instead, you need a GitHub App and its private key:
-
-1. **Create a GitHub App** (GitHub → Settings → Developer settings → GitHub Apps →
-   New). Give it a name and avatar. Set repository permissions: Pull requests =
-   Read & write, Issues = Read & write, Checks = Read & write, Contents = Read-only.
-2. **Install the app** on the repository you want reviewed.
-3. **Generate a private key** (the app's settings → "Generate a private key") — this
-   downloads a `.pem` file.
-4. In that repo's Settings → Secrets and variables → Actions, add a **variable**
-   `COCO_APP_ID` (the app's numeric ID) and a **secret** `COCO_APP_PRIVATE_KEY`
-   (paste the full `.pem` contents).
-5. Pass both to the action:
-
-   ```yaml
-   - uses: sfc-gh-jgrip/coco-code-review@v1
-     with:
-       # ... the snowflake-* inputs ...
-       coco-app-id: ${{ vars.COCO_APP_ID }}
-       coco-app-private-key: ${{ secrets.COCO_APP_PRIVATE_KEY }}
-   ```
-
-   Each repo uses its own app — the private key is a secret you can't share, so a
-   public consumer creates their own.
-
 What not to do:
 
 - Do not commit auth files or generated connection artifacts to the repo.
