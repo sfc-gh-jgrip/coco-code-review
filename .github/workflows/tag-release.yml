@@ -1,0 +1,51 @@
+name: tag-release
+
+# "Deploy" for this action repo means landing on main. Each push to main cuts a
+# new minor release (vX.Y.0 -> vX.(Y+1).0) and moves the major alias (vX) to it,
+# so consumers can pin `@v1` and get the latest compatible release automatically.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+# Don't let overlapping pushes race on tag creation.
+concurrency: tag-release
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute next minor version and move major alias
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+
+          # Latest full semver tag (vMAJOR.MINOR.PATCH), highest by version sort.
+          latest="$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' | sort -V | tail -n1)"
+          if [ -z "$latest" ]; then
+            next="v1.0.0"
+            major="v1"
+          else
+            ver="${latest#v}"
+            IFS=. read -r ma mi _pa <<< "$ver"
+            next="v${ma}.$((mi + 1)).0"
+            major="v${ma}"
+          fi
+          echo "latest=$latest -> next=$next (alias $major)"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Full release tag is immutable; the major alias moves forward.
+          git tag -a "$next" -m "$next"
+          git tag -fa "$major" -m "$major -> $next"
+          git push origin "$next"
+          git push -f origin "$major"
+
+          echo "### Released \`$next\` (alias \`$major\`)" >> "$GITHUB_STEP_SUMMARY"
