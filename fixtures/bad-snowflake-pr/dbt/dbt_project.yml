@@ -1,0 +1,11 @@
+name: 'acme_analytics'
+version: '1.0.0'
+config-version: 2
+
+profile: 'acme'
+
+model-paths: ["models"]
+
+models:
+  acme_analytics:
+    +materialized: view

@@ -1,0 +1,12 @@
+version: 2
+
+models:
+  - name: fct_order_lines
+    description: One row per order line.
+    columns:
+      - name: order_id
+        description: Order identifier (not unique at this grain).
+      - name: line_number
+        description: Line number within the order.
+      # No unique / not_null test on the (order_id, line_number) key, and no
+      # tests at all on a brand-new fact model.
