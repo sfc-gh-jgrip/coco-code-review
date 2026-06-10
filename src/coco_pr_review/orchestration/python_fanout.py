@@ -21,6 +21,7 @@ from typing import Any, Callable, Awaitable
 import jsonschema
 
 from coco_pr_review.config import CocoPRReviewConfig, DEFAULT_CONFIG, ReviewerOverride
+from coco_pr_review.detection import should_activate
 from coco_pr_review.orchestration.base import (
     BudgetGate,
     ChangedFile,
@@ -32,7 +33,7 @@ from coco_pr_review.orchestration.base import (
     PullRequestContext,
     RunResult,
 )
-from coco_pr_review.prompts import wrap_untrusted
+from coco_pr_review.prompts import build_reviewer_system_prompt, wrap_untrusted
 from coco_pr_review.reviewer_spec import ReviewerSpec
 from coco_pr_review.schema import REVIEWER_OUTPUT_SCHEMA, VERIFIER_OUTPUT_SCHEMA
 
@@ -259,12 +260,28 @@ class PythonFanoutOrchestrator(Orchestrator):
         else:
             replica_counts = {name: ov.replicas for name, ov in overrides_by_name.items()}
 
-        # Filter out reviewers that are explicitly disabled in config.
+        # Filter out reviewers that are explicitly disabled in config, then drop
+        # conditional reviewers whose `activate_when` predicate does not match
+        # this PR (deterministic, model-budget-free — see `detection`).
+        repo_root = getattr(pr_context, "repo_root", None)
+        changed_file_paths = [
+            cf.path for cf in (getattr(pr_context, "changed_files", []) or [])
+        ]
         active_reviewers: list[ReviewerSpec] = []
         for spec in reviewers:
             override = overrides_by_name.get(spec.name)
             if override is not None and not override.enabled:
                 logger.info("Reviewer %s disabled via config; skipping.", spec.name)
+                continue
+            if (
+                override is not None
+                and repo_root is not None
+                and not should_activate(override, repo_root, changed_file_paths)
+            ):
+                logger.info(
+                    "Reviewer %s not activated for this PR (activate_when unmatched); skipping.",
+                    spec.name,
+                )
                 continue
             active_reviewers.append(spec)
 
@@ -296,15 +313,14 @@ class PythonFanoutOrchestrator(Orchestrator):
 
         async def _invoke_reviewer(reviewer: ReviewerSpec, _replica_idx: int) -> list[dict[str, Any]]:
             """Invoke one reviewer replica; return its findings list (may be empty)."""
-            # Apply config-driven `prompt_extra` (maintainer-controlled, trusted).
+            # Assemble the per-reviewer system prompt: base + optional skill
+            # directive + config-driven `prompt_extra` (all maintainer-controlled).
             override = overrides_by_name.get(reviewer.name)
-            if override is not None and override.prompt_extra:
-                system_prompt = (
-                    f"{reviewer.system_prompt}\n\n"
-                    f"## Additional instructions\n{override.prompt_extra}"
-                )
-            else:
-                system_prompt = reviewer.system_prompt
+            system_prompt = build_reviewer_system_prompt(
+                reviewer.system_prompt,
+                skill=override.skill if override is not None else None,
+                prompt_extra=override.prompt_extra if override is not None else None,
+            )
 
             output, result = await self._run_one_query(
                 system_prompt=system_prompt,

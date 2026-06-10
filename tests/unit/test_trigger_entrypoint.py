@@ -501,3 +501,91 @@ def test_main_routes_push_event_to_branch_review() -> None:
         assert github_event.main() == 0
         branch_review.assert_called_once()
         assert branch_review.call_args.kwargs["payload"] == _push_payload()
+
+
+# ---------------------------------------------------------------------------
+# Review runtime — enabled-reviewer loading + read-only/skill sandbox
+# ---------------------------------------------------------------------------
+
+
+def test_build_review_runtime_loads_only_enabled_reviewers(tmp_path: Path) -> None:
+    """The snowflake profile loads its 5 enabled reviewers; style/tests are skipped."""
+    from coco_pr_review.config import load_config
+    from coco_pr_review.github_event import _build_review_runtime
+
+    config = load_config(None, profile="snowflake")
+    reviewers, verifier, *_ = _build_review_runtime(tmp_path, config)
+
+    names = {r.name for r in reviewers}
+    assert names == {
+        "bugs-and-security",
+        "performance-and-cost",
+        "snowflake-governance-security",
+        "sql-correctness",
+        "dbt-transformation",
+    }
+    assert verifier.name == "verifier"
+
+
+@pytest.mark.asyncio
+async def test_reviewer_query_uses_readonly_skill_sandbox(tmp_path: Path, monkeypatch) -> None:
+    """The reviewer query passes a disallowed_tools sandbox that keeps Read/Glob/Grep/skill."""
+    import coco_pr_review.github_event as ge
+    from coco_pr_review.config import load_config
+
+    captured: dict[str, object] = {}
+
+    def fake_query(*, prompt, options):
+        captured["options"] = options
+
+        async def _empty_stream():
+            return
+            yield  # pragma: no cover — makes this an async generator
+
+        return _empty_stream()
+
+    async def fake_run_one_query(*, message_stream):
+        await message_stream.aclose()
+        return ({"findings": []}, MagicMock(total_cost_usd=0.0, num_turns=0, files_read=[]))
+
+    monkeypatch.setattr(ge, "query", fake_query)
+    monkeypatch.setattr(ge, "run_one_query", fake_run_one_query)
+
+    config = load_config(None, profile="snowflake")
+    _, _, orchestrator, *_ = _build_runtime(ge, tmp_path, config)
+
+    await orchestrator._run_one_query(
+        system_prompt="You are sql-correctness.",
+        user_prompt="diff",
+        output_schema=None,
+    )
+
+    options = captured["options"]
+    disallowed = set(options.disallowed_tools)
+    # Mutating / data / network / subagent tools are removed.
+    assert {"Bash", "SQL", "Write", "Edit"} <= disallowed
+    # Read-only inspection + skill loading remain available.
+    assert disallowed.isdisjoint({"Read", "Glob", "Grep", "skill"})
+
+
+def _build_runtime(ge, repo_root, config):
+    return ge._build_review_runtime(repo_root, config)
+
+
+def test_resolve_config_applies_default_profile_without_config_file() -> None:
+    """No .coco-pr-review.yml → snowflake (default) profile still applies."""
+    from coco_pr_review.github_event import _resolve_config
+
+    config = _resolve_config(None)
+    assert config.orchestration.profile == "snowflake"
+    enabled = {r.name for r in config.reviewers if r.enabled}
+    assert "snowflake-governance-security" in enabled
+    assert "sql-correctness" in enabled
+
+
+def test_resolve_config_honors_comment_override_without_config_file() -> None:
+    """A @coco-review cheap override applies even when no config file exists."""
+    from coco_pr_review.github_event import _resolve_config
+
+    config = _resolve_config(None, "cheap")
+    assert config.orchestration.profile == "cheap"

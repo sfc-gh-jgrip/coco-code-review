@@ -63,3 +63,37 @@ def test_discover_conventions_returns_none_when_nothing_present(tmp_path: Path) 
     found = discover_conventions(tmp_path)
 
     assert found is None
+
+
+def test_build_reviewer_system_prompt_no_appendices_returns_base() -> None:
+    from coco_pr_review.prompts import build_reviewer_system_prompt
+
+    assert build_reviewer_system_prompt("BASE") == "BASE"
+
+
+def test_build_reviewer_system_prompt_threads_skill() -> None:
+    from coco_pr_review.prompts import build_reviewer_system_prompt
+
+    out = build_reviewer_system_prompt("BASE", skill="sql-author")
+    assert "BASE" in out
+    assert "## Required skill" in out
+    assert "`skill` tool" in out
+    assert "`sql-author`" in out
+
+
+def test_build_reviewer_system_prompt_threads_skill_and_prompt_extra_in_order() -> None:
+    from coco_pr_review.prompts import build_reviewer_system_prompt
+
+    out = build_reviewer_system_prompt(
+        "BASE", skill="data-governance", prompt_extra="Focus on grants."
+    )
+    assert out.index("BASE") < out.index("## Required skill") < out.index("## Additional instructions")
+    assert "Focus on grants." in out
+
+
+def test_build_reviewer_system_prompt_prompt_extra_only() -> None:
+    from coco_pr_review.prompts import build_reviewer_system_prompt
+
+    out = build_reviewer_system_prompt("BASE", prompt_extra="X")
+    assert "## Required skill" not in out
+    assert "## Additional instructions\nX" in out

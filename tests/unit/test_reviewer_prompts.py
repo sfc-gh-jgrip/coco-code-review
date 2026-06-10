@@ -12,12 +12,15 @@ from pathlib import Path
 
 import pytest
 
-# All four reviewer names defined in the plan — kebab-case, matching filenames.
+# All reviewer names with a bundled prompt .md — kebab-case, matching filenames.
 REVIEWER_NAMES = [
     "bugs-and-security",
     "tests-coverage",
     "style-and-conventions",
     "performance-and-cost",
+    "snowflake-governance-security",
+    "sql-correctness",
+    "dbt-transformation",
 ]
 
 # Root of the agents directory (relative to this test file).

@@ -179,8 +179,11 @@ The reviewer works with **zero config**. To tune it, drop a `.coco-pr-review.yml
 at the root of the repo being reviewed; every key is optional and layers on top of
 the defaults.
 
-**Default behavior** (no config): the `high` profile runs the `bugs-and-security`
-and `performance-and-cost` reviewers (1 replica each) plus a verifier pass —
+**Default behavior** (no config): the `snowflake` profile runs three always-on
+reviewers — `bugs-and-security`, `performance-and-cost`, and
+`snowflake-governance-security` — plus two conditional reviewers,
+`sql-correctness` and `dbt-transformation`, that only fire when the PR actually
+touches SQL or a dbt project (see [Conditional activation](#conditional-activation)).
 `style-and-conventions` and `tests-coverage` are off. Budget ~30 min / $4 per PR.
 
 #### Profiles
@@ -189,7 +192,8 @@ A profile is a named bundle of settings:
 
 | Profile | Reviewers (+ verifier) | Budget |
 |---------|------------------------|--------|
-| `high` (default) | `bugs-and-security` + `performance-and-cost` | 30 min / $4 |
+| `snowflake` (default) | `bugs-and-security` + `performance-and-cost` + `snowflake-governance-security`, plus `sql-correctness` & `dbt-transformation` when SQL/dbt is touched | 30 min / $4 |
+| `high` | `bugs-and-security` + `performance-and-cost` | 30 min / $4 |
 | `cheap` | `bugs-and-security` | 10 min / $1 |
 
 Set it per-repo:
@@ -202,15 +206,45 @@ orchestration:
 …or override it per-PR by commenting on the pull request:
 
 ```
-@coco-review cheap
+@coco-review snowflake
 @coco-review high
+@coco-review cheap
 ```
 
 A bare `@coco-review` (or any unrecognized word) re-runs with the repo's default profile.
 
+The Snowflake-specific reviewers each load a bundled Cortex skill as their review
+checklist (`snowflake-governance-security` → `data-governance`,
+`performance-and-cost` → `warehouse`, `sql-correctness` → `sql-author`,
+`dbt-transformation` → `dbt-projects-on-snowflake`). All reviewers run read-only:
+they can Read/Glob/Grep the checkout and load their skill, but cannot edit files,
+run shell or SQL, reach the network, or spawn subagents.
+
+#### Conditional activation
+
+Conditional reviewers carry an `activate_when` rule and are skipped — at zero
+model cost — when a PR does not match. The decision is a pure function of the
+changed-file list plus a couple of marker-file checks:
+
+- `sql-correctness` runs when the PR changes `**/*.sql` (or `.sql.jinja` / `.sql.j2`).
+- `dbt-transformation` runs when a `dbt_project.yml` exists at the repo root, or
+  when the PR touches `**/dbt_project.yml` or `**/models/**`.
+
+A reviewer with no `activate_when` is always-on. You can attach or adjust a rule
+in config:
+
+```yaml
+reviewers:
+  - name: sql-correctness
+    activate_when:
+      changed_globs: ["**/*.sql"]
+      any_marker: ["schema/migrations"]   # also run if this path exists
+```
+
 #### Reviewers
 
-Four bundled lenses. Enable/disable them, add replicas, or append your own guidance:
+Bundled lenses. Enable/disable them, add replicas, attach a skill, or append your
+own guidance:
 
 ```yaml
 reviewers:
@@ -221,9 +255,11 @@ reviewers:
     prompt_extra: "Also flag architectural smells: leaky module boundaries, cyclic deps, god objects."
 ```
 
-Available names: `bugs-and-security`, `performance-and-cost`, `style-and-conventions`,
-`tests-coverage`. `prompt_extra` appends instructions to that lens — it's the way to
-steer a review toward something specific (e.g. architecture). You can't register a
+Available names: `bugs-and-security`, `performance-and-cost`,
+`snowflake-governance-security`, `sql-correctness`, `dbt-transformation`,
+`style-and-conventions`, `tests-coverage`. `prompt_extra` appends instructions to
+that lens; `skill` names a bundled Cortex skill the reviewer loads as its
+checklist; `activate_when` gates it on the changed files. You can't register a
 brand-new named reviewer via config; that requires adding an agent prompt to the package.
 
 #### Other knobs (with defaults)
