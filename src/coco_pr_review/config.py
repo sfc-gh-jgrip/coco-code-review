@@ -34,8 +34,8 @@ _EFFORT_LEVELS = ("low", "medium", "high")
 # or per-PR (`@coco-review cheap|high`). A profile is layered between the raw
 # base defaults and the repo's `.coco-pr-review.yml`, so a repo can still tune
 # any individual knob a profile sets. See `_profile_overlays`.
-PROFILE_NAMES = ("high", "cheap")
-DEFAULT_PROFILE = "high"
+PROFILE_NAMES = ("snowflake", "high", "cheap")
+DEFAULT_PROFILE = "snowflake"
 _TOOL_TIERS = ("read-only", "read-sql", "read-sql-bash")
 
 # Top-level YAML keys this loader recognises. Anything else raises ConfigError.
@@ -61,8 +61,9 @@ _ALLOWED_LIMITS = frozenset(
 )
 _ALLOWED_VERIFIER = frozenset({"enabled", "model", "effort", "confidence_threshold"})
 _ALLOWED_REVIEWER = frozenset(
-    {"name", "tool_tier", "replicas", "enabled", "prompt_extra"}
+    {"name", "tool_tier", "replicas", "enabled", "prompt_extra", "activate_when", "skill"}
 )
+_ALLOWED_ACTIVATE_WHEN = frozenset({"any_marker", "changed_globs"})
 _ALLOWED_SANITIZE = frozenset({"enabled", "extra_patterns"})
 _ALLOWED_TELEMETRY = frozenset({"snowflake_table"})
 
@@ -108,12 +109,30 @@ class VerifierConfig:
 
 
 @dataclass(frozen=True)
+class ActivationRule:
+    """Conditional-activation predicate for a reviewer.
+
+    A reviewer carrying an ``ActivationRule`` only runs when the PR matches it:
+    either a marker file exists somewhere in the repo (``any_marker``) OR a
+    changed path matches one of ``changed_globs``. A reviewer with no rule
+    (``activate_when is None``) is always-on.
+    """
+
+    any_marker: tuple[str, ...] = ()
+    changed_globs: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class ReviewerOverride:
     name: str
     tool_tier: str = "read-only"
     replicas: int = 1
     enabled: bool = True
     prompt_extra: str | None = None
+    # None → always-on; otherwise the reviewer is gated by this predicate.
+    activate_when: ActivationRule | None = None
+    # Name of a bundled Cortex skill the reviewer loads as its checklist.
+    skill: str | None = None
 
 
 @dataclass(frozen=True)
@@ -170,6 +189,67 @@ def _profile_overlays() -> dict[str, dict[str, Any]]:
     verifier, and limits are all knobs — tune freely.
     """
     return {
+        # snowflake — the default profile for Snowflake/dbt repos. Three
+        # always-on reviewers (generic bugs/security, warehouse cost/perf,
+        # Snowflake governance & security) plus two conditional reviewers that
+        # only fire when the PR actually touches SQL or a dbt project. Each
+        # Snowflake-specific reviewer loads one bundled Cortex skill as its
+        # checklist. Style/test reviewers stay off (re-enable with a one-liner).
+        "snowflake": {
+            "limits": {"job_timeout_sec": 1800, "max_usd_per_pr": 4.00},
+            "reviewers": [
+                # Always-on (no activate_when).
+                {"name": "bugs-and-security", "enabled": True, "replicas": 1},
+                {
+                    "name": "performance-and-cost",
+                    "enabled": True,
+                    "replicas": 1,
+                    "skill": "warehouse",
+                },
+                {
+                    "name": "snowflake-governance-security",
+                    "enabled": True,
+                    "replicas": 1,
+                    "tool_tier": "read-only",
+                    "skill": "data-governance",
+                },
+                # Conditional — only when the PR touches SQL.
+                {
+                    "name": "sql-correctness",
+                    "enabled": True,
+                    "replicas": 1,
+                    "tool_tier": "read-only",
+                    "skill": "sql-author",
+                    "activate_when": {
+                        "changed_globs": [
+                            "**/*.sql",
+                            "**/*.sql.jinja",
+                            "**/*.sql.j2",
+                        ]
+                    },
+                },
+                # Conditional — only for dbt projects.
+                {
+                    "name": "dbt-transformation",
+                    "enabled": True,
+                    "replicas": 1,
+                    "tool_tier": "read-only",
+                    "skill": "dbt-projects-on-snowflake",
+                    "activate_when": {
+                        "any_marker": ["dbt_project.yml", "dbt_project.yaml"],
+                        "changed_globs": [
+                            "**/dbt_project.yml",
+                            "**/models/**/*.sql",
+                            "**/models/**/*.yml",
+                            "**/models/**/*.yaml",
+                        ],
+                    },
+                },
+                # Off by default; re-enable per-repo with a one-line overlay.
+                {"name": "style-and-conventions", "enabled": False},
+                {"name": "tests-coverage", "enabled": False},
+            ],
+        },
         # high — the serious multi-lens review (bughunter-like): correctness +
         # performance lenses, verifier on, generous 30-min budget.
         "high": {
@@ -589,12 +669,59 @@ def _build_reviewer(data: Mapping[str, Any], *, source: str) -> ReviewerOverride
             f"{source}: reviewer `{name}` prompt_extra must be a string or null, "
             f"got {type(prompt_extra).__name__}"
         )
+    activate_when = _build_activate_when(
+        data.get("activate_when"), name=name, source=source
+    )
+    skill = data.get("skill")
+    if skill is not None and not isinstance(skill, str):
+        raise ConfigError(
+            f"{source}: reviewer `{name}` skill must be a string or null, "
+            f"got {type(skill).__name__}"
+        )
     return ReviewerOverride(
         name=name,
         tool_tier=tool_tier,
         replicas=replicas,
         enabled=enabled,
         prompt_extra=prompt_extra,
+        activate_when=activate_when,
+        skill=skill,
+    )
+
+
+def _build_activate_when(
+    value: Any, *, name: str, source: str
+) -> ActivationRule | None:
+    """Parse a reviewer's optional ``activate_when`` predicate.
+
+    ``None`` (or absent) → always-on. Otherwise a mapping with optional
+    ``any_marker`` and ``changed_globs`` string lists.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise ConfigError(
+            f"{source}: reviewer `{name}` activate_when must be a mapping or null, "
+            f"got {type(value).__name__}"
+        )
+    unknown = set(value.keys()) - _ALLOWED_ACTIVATE_WHEN
+    if unknown:
+        raise ConfigError(
+            f"{source}: unknown key(s) in reviewer `{name}` activate_when: "
+            f"{sorted(unknown)}. Allowed: {sorted(_ALLOWED_ACTIVATE_WHEN)}"
+        )
+    any_marker = _require_list_of_str(
+        value.get("any_marker", []),
+        key=f"reviewers[{name}].activate_when.any_marker",
+        source=source,
+    )
+    changed_globs = _require_list_of_str(
+        value.get("changed_globs", []),
+        key=f"reviewers[{name}].activate_when.changed_globs",
+        source=source,
+    )
+    return ActivationRule(
+        any_marker=tuple(any_marker), changed_globs=tuple(changed_globs)
     )
 
 
@@ -680,6 +807,7 @@ def _require_list_of_str(value: Any, *, key: str, source: str) -> list[str]:
 
 
 __all__ = [
+    "ActivationRule",
     "CocoPRReviewConfig",
     "ConfigError",
     "DEFAULT_CONFIG",

@@ -100,6 +100,8 @@ def test_dataclass_field_names_match_yaml_spec_exactly() -> None:
         "replicas",
         "enabled",
         "prompt_extra",
+        "activate_when",
+        "skill",
     }
     assert set(SanitizeConfig.__dataclass_fields__) == {"enabled", "extra_patterns"}
     assert set(TelemetryConfig.__dataclass_fields__) == {"snowflake_table"}
@@ -591,3 +593,114 @@ def test_file_knob_overrides_profile_default(tmp_path: Path) -> None:
     )
     cfg = load_config(cfg_path)
     assert cfg.limits.job_timeout_sec == 1200
+
+
+# ---------------------------------------------------------------------------
+# snowflake profile (default) + activate_when / skill fields
+# ---------------------------------------------------------------------------
+
+
+def test_snowflake_is_the_default_profile() -> None:
+    """With no explicit profile, load_config resolves the snowflake profile."""
+    from coco_pr_review.config import DEFAULT_PROFILE, load_config
+
+    assert DEFAULT_PROFILE == "snowflake"
+    cfg = load_config(None, cli_overrides={"max_diff_lines": 100})
+    assert cfg.orchestration.profile == "snowflake"
+
+
+def test_snowflake_profile_enabled_reviewer_set() -> None:
+    """snowflake enables 3 always-on + 2 conditional reviewers; style/tests off."""
+    from coco_pr_review.config import load_config
+
+    cfg = load_config(None, profile="snowflake")
+    assert _enabled(cfg) == {
+        "bugs-and-security",
+        "performance-and-cost",
+        "snowflake-governance-security",
+        "sql-correctness",
+        "dbt-transformation",
+    }
+    assert cfg.limits.job_timeout_sec == 1800
+
+
+def test_snowflake_profile_skill_assignments() -> None:
+    """Each Snowflake-specific reviewer loads its bundled skill; generic one does not."""
+    from coco_pr_review.config import load_config
+
+    cfg = load_config(None, profile="snowflake")
+    by_name = {r.name: r for r in cfg.reviewers}
+    assert by_name["bugs-and-security"].skill is None
+    assert by_name["performance-and-cost"].skill == "warehouse"
+    assert by_name["snowflake-governance-security"].skill == "data-governance"
+    assert by_name["sql-correctness"].skill == "sql-author"
+    assert by_name["dbt-transformation"].skill == "dbt-projects-on-snowflake"
+
+
+def test_snowflake_profile_activation_rules() -> None:
+    """Always-on reviewers carry no rule; conditional reviewers carry globs/markers."""
+    from coco_pr_review.config import load_config
+
+    cfg = load_config(None, profile="snowflake")
+    by_name = {r.name: r for r in cfg.reviewers}
+
+    assert by_name["bugs-and-security"].activate_when is None
+    assert by_name["snowflake-governance-security"].activate_when is None
+
+    sql = by_name["sql-correctness"].activate_when
+    assert sql is not None
+    assert "**/*.sql" in sql.changed_globs
+
+    dbt = by_name["dbt-transformation"].activate_when
+    assert dbt is not None
+    assert "dbt_project.yml" in dbt.any_marker
+    assert any("models/" in g for g in dbt.changed_globs)
+
+
+def test_reviewer_activate_when_and_skill_parse_from_file(tmp_path: Path) -> None:
+    """A repo can declare activate_when + skill on a reviewer override."""
+    from coco_pr_review.config import load_config
+
+    cfg_path = tmp_path / ".coco-pr-review.yml"
+    cfg_path.write_text(
+        "reviewers:\n"
+        "  - name: sql-correctness\n"
+        "    skill: sql-author\n"
+        "    activate_when:\n"
+        "      changed_globs:\n"
+        "        - '**/*.sql'\n"
+        "      any_marker:\n"
+        "        - dbt_project.yml\n"
+    )
+    cfg = load_config(cfg_path)
+    by_name = {r.name: r for r in cfg.reviewers}
+    sql = by_name["sql-correctness"]
+    assert sql.skill == "sql-author"
+    assert sql.activate_when is not None
+    assert sql.activate_when.changed_globs == ("**/*.sql",)
+    assert sql.activate_when.any_marker == ("dbt_project.yml",)
+
+
+def test_reviewer_unknown_activate_when_key_rejected(tmp_path: Path) -> None:
+    from coco_pr_review.config import ConfigError, load_config
+
+    cfg_path = tmp_path / ".coco-pr-review.yml"
+    cfg_path.write_text(
+        "reviewers:\n"
+        "  - name: sql-correctness\n"
+        "    activate_when:\n"
+        "      bogus_key: [x]\n"
+    )
+    with pytest.raises(ConfigError, match="activate_when"):
+        load_config(cfg_path)
+
+
+def test_reviewer_skill_must_be_string(tmp_path: Path) -> None:
+    from coco_pr_review.config import ConfigError, load_config
+
+    cfg_path = tmp_path / ".coco-pr-review.yml"
+    cfg_path.write_text(
+        "reviewers:\n  - name: sql-correctness\n    skill: 123\n"
+    )
+    with pytest.raises(ConfigError, match="skill"):
+        load_config(cfg_path)

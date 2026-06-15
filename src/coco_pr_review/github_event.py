@@ -15,7 +15,12 @@ from typing import Any
 from cortex_code_agent_sdk import CortexCodeAgentOptions, query
 from github import Auth, Github
 
-from coco_pr_review.config import PROFILE_NAMES, find_config, load_config
+from coco_pr_review.config import (
+    DEFAULT_PROFILE,
+    PROFILE_NAMES,
+    find_config,
+    load_config,
+)
 from coco_pr_review.git_diff import changed_files_from_git
 from coco_pr_review.github.branch_source import BranchReviewSource
 from coco_pr_review.github.client import GitHubClient
@@ -36,6 +41,29 @@ ALLOWED_AUTHOR_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
 # GITHUB_TOKEN identity in Actions; a GitHub App run overrides it via the
 # COCO_BOT_LOGIN env var (e.g. "coco-pr-review[bot]").
 DEFAULT_BOT_LOGIN = "github-actions[bot]"
+
+# Read-only + skill sandbox for reviewer queries. Reviewers are dispatched as
+# the main agent of each `query()` (via append_system_prompt), so they inherit
+# the CLI's full default tool surface unless we trim it. These canonical CLI
+# tool ids are removed from the model's context so a reviewer can only Read /
+# Glob / Grep the checked-out source and load its `skill` (lowercase tool id in
+# the CLI). It cannot mutate files, run shell or SQL, reach the network, or
+# spawn subagents. Unknown ids are harmless no-ops if the CLI renames a tool.
+_REVIEWER_DISALLOWED_TOOLS: tuple[str, ...] = (
+    "Bash",
+    "SQL",
+    "Write",
+    "Edit",
+    "MultiEdit",
+    "NotebookEdit",
+    "notebook_actions",
+    "fdbt",
+    "WebFetch",
+    "WebSearch",
+    "Task",
+    "AskUserQuestion",
+    "TodoWrite",
+)
 
 
 class UnsupportedGitHubEventError(ValueError):
@@ -209,6 +237,21 @@ def parse_review_command(comment_body: str) -> str | None:
     return token if token in PROFILE_NAMES else None
 
 
+def _resolve_config(config_path: Any, profile_override: str | None = None) -> Any:
+    """Load config, ensuring the default profile applies even with no config file.
+
+    ``load_config(None)`` deliberately returns the raw, *unprofiled* base, so a
+    consumer repo that ships no ``.coco-pr-review.yml`` would otherwise miss the
+    default (snowflake) profile entirely. When there is no file we explicitly
+    resolve the default profile (or a ``@coco-review`` override). When a file
+    exists, its own ``orchestration.profile`` (or ``DEFAULT_PROFILE``) is honored
+    as usual, with an explicit override still winning.
+    """
+    if config_path is None:
+        return load_config(None, profile=profile_override or DEFAULT_PROFILE)
+    return load_config(config_path, profile=profile_override)
+
+
 def resolve_head_sha(
     event: PullRequestEvent | IssueCommentEvent,
     github: Github,
@@ -375,11 +418,14 @@ def _build_review_runtime(
     # won't contain src/coco_pr_review/agents/; the prompts ship inside the
     # pip-installed package, so resolve them relative to this module.
     reviewers_dir = Path(__file__).resolve().parent / "agents"
+    # Load a spec for every reviewer ENABLED in the resolved config (the active
+    # profile decides the set). The orchestrator further drops conditional
+    # reviewers whose `activate_when` predicate does not match this PR (see
+    # `detection`). Disabled reviewers are never loaded.
     reviewers = [
-        parse_agent_md(reviewers_dir / "bugs-and-security.md"),
-        parse_agent_md(reviewers_dir / "tests-coverage.md"),
-        parse_agent_md(reviewers_dir / "style-and-conventions.md"),
-        parse_agent_md(reviewers_dir / "performance-and-cost.md"),
+        parse_agent_md(reviewers_dir / f"{override.name}.md")
+        for override in config.reviewers
+        if override.enabled
     ]
     verifier = parse_agent_md(reviewers_dir / "verifier.md")
 
@@ -415,6 +461,12 @@ def _build_review_runtime(
                     append_system_prompt=system_prompt,
                     stderr=_on_stderr,
                     output_format=output_format,
+                    # Read-only + skill sandbox: reviewers keep Read/Glob/Grep
+                    # and the `skill` tool (lowercase, per the CLI) but cannot
+                    # mutate the checkout, run shell/SQL, hit the network, or
+                    # spawn subagents. Names are the CLI's canonical tool ids;
+                    # unknown names are harmless no-ops.
+                    disallowed_tools=list(_REVIEWER_DISALLOWED_TOOLS),
                 ),
             )
         ) as message_stream:
@@ -467,7 +519,7 @@ def _run_branch_review(*, repo_root: Path, config_path: Any, payload: dict[str, 
         )
         return 0
 
-    config = load_config(config_path)
+    config = _resolve_config(config_path)
     logging.getLogger("coco_pr_review").info(
         "effort profile: %s (config default)", config.orchestration.profile
     )
@@ -548,7 +600,7 @@ def main() -> int:
         if isinstance(event, IssueCommentEvent)
         else None
     )
-    config = load_config(config_path, profile=profile_override)
+    config = _resolve_config(config_path, profile_override)
     logging.getLogger("coco_pr_review").info(
         "effort profile: %s%s",
         config.orchestration.profile,

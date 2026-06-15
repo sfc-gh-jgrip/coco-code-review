@@ -173,6 +173,112 @@ GitHub OIDC token, writes the Snowflake `connections.toml`, and runs the reviewe
 > release like `@v1.2.0`. Each merge to `main` cuts a new minor release and moves
 > `v1` forward.
 
+### Review modes and configuration
+
+The reviewer works with **zero config**. To tune it, drop a `.coco-pr-review.yml`
+at the root of the repo being reviewed; every key is optional and layers on top of
+the defaults.
+
+**Default behavior** (no config): the `snowflake` profile runs three always-on
+reviewers — `bugs-and-security`, `performance-and-cost`, and
+`snowflake-governance-security` — plus two conditional reviewers,
+`sql-correctness` and `dbt-transformation`, that only fire when the PR actually
+touches SQL or a dbt project (see [Conditional activation](#conditional-activation)).
+`style-and-conventions` and `tests-coverage` are off. Budget ~30 min / $4 per PR.
+
+#### Profiles
+
+A profile is a named bundle of settings:
+
+| Profile | Reviewers (+ verifier) | Budget |
+|---------|------------------------|--------|
+| `snowflake` (default) | `bugs-and-security` + `performance-and-cost` + `snowflake-governance-security`, plus `sql-correctness` & `dbt-transformation` when SQL/dbt is touched | 30 min / $4 |
+| `high` | `bugs-and-security` + `performance-and-cost` | 30 min / $4 |
+| `cheap` | `bugs-and-security` | 10 min / $1 |
+
+Set it per-repo:
+
+```yaml
+orchestration:
+  profile: cheap
+```
+
+…or override it per-PR by commenting on the pull request:
+
+```
+@coco-review snowflake
+@coco-review high
+@coco-review cheap
+```
+
+A bare `@coco-review` (or any unrecognized word) re-runs with the repo's default profile.
+
+The Snowflake-specific reviewers each load a bundled Cortex skill as their review
+checklist (`snowflake-governance-security` → `data-governance`,
+`performance-and-cost` → `warehouse`, `sql-correctness` → `sql-author`,
+`dbt-transformation` → `dbt-projects-on-snowflake`). All reviewers run read-only:
+they can Read/Glob/Grep the checkout and load their skill, but cannot edit files,
+run shell or SQL, reach the network, or spawn subagents.
+
+#### Conditional activation
+
+Conditional reviewers carry an `activate_when` rule and are skipped — at zero
+model cost — when a PR does not match. The decision is a pure function of the
+changed-file list plus a couple of marker-file checks:
+
+- `sql-correctness` runs when the PR changes `**/*.sql` (or `.sql.jinja` / `.sql.j2`).
+- `dbt-transformation` runs when a `dbt_project.yml` exists at the repo root, or
+  when the PR touches `**/dbt_project.yml` or `**/models/**`.
+
+A reviewer with no `activate_when` is always-on. You can attach or adjust a rule
+in config:
+
+```yaml
+reviewers:
+  - name: sql-correctness
+    activate_when:
+      changed_globs: ["**/*.sql"]
+      any_marker: ["schema/migrations"]   # also run if this path exists
+```
+
+#### Reviewers
+
+Bundled lenses. Enable/disable them, add replicas, attach a skill, or append your
+own guidance:
+
+```yaml
+reviewers:
+  - name: tests-coverage
+    enabled: true
+  - name: bugs-and-security
+    replicas: 2
+    prompt_extra: "Also flag architectural smells: leaky module boundaries, cyclic deps, god objects."
+```
+
+Available names: `bugs-and-security`, `performance-and-cost`,
+`snowflake-governance-security`, `sql-correctness`, `dbt-transformation`,
+`style-and-conventions`, `tests-coverage`. `prompt_extra` appends instructions to
+that lens; `skill` names a bundled Cortex skill the reviewer loads as its
+checklist; `activate_when` gates it on the changed files. You can't register a
+brand-new named reviewer via config; that requires adding an agent prompt to the package.
+
+#### Other knobs (with defaults)
+
+```yaml
+verifier:
+  enabled: true
+  confidence_threshold: 80     # drop findings the verifier scores below this
+limits:
+  max_usd_per_pr: 2.00         # profiles raise/lower this
+  job_timeout_sec: 600
+  max_findings_per_reviewer: 20
+max_diff_lines: 2000           # skip review when the diff is larger
+paths_ignore: []               # globs to exclude, e.g. ["dist/**", "*.lock"]
+review_bot_prs: false          # also review PRs opened by bots
+sanitize:
+  enabled: true                # redact secret-like strings from prompts/output
+```
+
 What not to do:
 
 - Do not commit auth files or generated connection artifacts to the repo.

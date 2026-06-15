@@ -1751,3 +1751,85 @@ async def test_output_schema_forwarded_to_run_one_query() -> None:
     assert all(schema is REVIEWER_OUTPUT_SCHEMA for schema in reviewer_schemas)
     assert all(schema is VERIFIER_OUTPUT_SCHEMA for schema in verifier_schemas)
 
+# ---------------------------------------------------------------------------
+# Detection gate — conditional reviewers skipped when activate_when unmatched
+# ---------------------------------------------------------------------------
+
+
+def _detection_config():
+    """Config with one always-on reviewer + one SQL-conditional reviewer."""
+    import dataclasses as dc
+
+    from coco_pr_review.config import (
+        ActivationRule,
+        DEFAULT_CONFIG,
+        ReviewerOverride,
+    )
+
+    return dc.replace(
+        DEFAULT_CONFIG,
+        reviewers=[
+            ReviewerOverride(name="bugs-and-security"),
+            ReviewerOverride(
+                name="sql-correctness",
+                activate_when=ActivationRule(changed_globs=("**/*.sql",)),
+            ),
+        ],
+    )
+
+
+async def _run_with_changed_paths(paths: list[str]) -> set[str]:
+    """Run the orchestrator for a PR touching `paths`; return reviewer names invoked."""
+    from coco_pr_review.orchestration.base import (
+        BudgetGate,
+        ChangedFile,
+        NoOpProgressSink,
+        PullRequestContext,
+    )
+    from coco_pr_review.orchestration.python_fanout import PythonFanoutOrchestrator
+
+    invoked: set[str] = set()
+
+    async def fake_run_one_query(*, system_prompt: str, user_prompt: str, **_: Any) -> tuple[Any, Any]:
+        if "verify" in system_prompt.lower():
+            return _make_verification(confidence=95), _FakeResult(cost=0.0, turns=0)
+        # The reviewer name is embedded in its system prompt ("You are <name>.").
+        for name in ("bugs-and-security", "sql-correctness"):
+            if name in system_prompt:
+                invoked.add(name)
+        return {"findings": []}, _FakeResult(cost=0.0, turns=0)
+
+    orch = PythonFanoutOrchestrator(
+        run_one_query=fake_run_one_query, config=_detection_config()
+    )
+    pr_context = PullRequestContext(
+        repo_root=Path("/tmp/fake-repo"),
+        changed_files=[ChangedFile(path=p, line_ranges=[(1, 1)]) for p in paths],
+        unified_diff="diff",
+        conventions_text=None,
+    )
+    await orch.run(
+        pr_context=pr_context,
+        reviewers=[
+            _make_reviewer_spec(name="bugs-and-security"),
+            _make_reviewer_spec(name="sql-correctness"),
+        ],
+        verifier=_make_verifier_spec(),
+        budget=BudgetGate(max_usd=10.0),
+        progress=NoOpProgressSink(),
+    )
+    return invoked
+
+
+@pytest.mark.asyncio
+async def test_conditional_reviewer_skipped_on_python_only_pr() -> None:
+    """A PR touching only .py files runs the always-on reviewer, skips sql-correctness."""
+    invoked = await _run_with_changed_paths(["src/app.py", "tests/test_app.py"])
+    assert invoked == {"bugs-and-security"}
+
+
+@pytest.mark.asyncio
+async def test_conditional_reviewer_activated_on_sql_pr() -> None:
+    """A PR touching a .sql file activates the SQL-conditional reviewer."""
+    invoked = await _run_with_changed_paths(["models/revenue.sql", "src/app.py"])
+    assert invoked == {"bugs-and-security", "sql-correctness"}

@@ -31,6 +31,36 @@ def wrap_untrusted(content: str) -> str:
     return f"{_OPEN}\n{content}\n{_CLOSE}"
 
 
+def build_reviewer_system_prompt(
+    base_prompt: str,
+    *,
+    skill: str | None = None,
+    prompt_extra: str | None = None,
+) -> str:
+    """Assemble a reviewer's full system prompt from its base + optional appendices.
+
+    Appends, in order:
+      1. A ``## Required skill`` block instructing the reviewer to load its one
+         bundled Cortex skill via the `skill` tool and use it as the review
+         checklist (maintainer-controlled, trusted).
+      2. A ``## Additional instructions`` block carrying the config
+         ``prompt_extra`` (maintainer-controlled, trusted).
+
+    Both are optional; with neither set the base prompt is returned unchanged.
+    """
+    parts = [base_prompt]
+    if skill:
+        parts.append(
+            "## Required skill\n"
+            f"Before reviewing, invoke the `skill` tool to load the `{skill}` "
+            "skill. Treat its guidance as the authoritative checklist for this "
+            "review. Load it once at the start; do not re-load it per finding."
+        )
+    if prompt_extra:
+        parts.append(f"## Additional instructions\n{prompt_extra}")
+    return "\n\n".join(parts)
+
+
 def discover_conventions(repo_root: Path) -> Path | None:
     """Find the highest-priority conventions file in `repo_root`, or None."""
     for relative in _CONVENTIONS_PRIORITY:
